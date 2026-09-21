@@ -1,0 +1,88 @@
+/* Chat Auto Backup — uses SillyTavern theme variables so it follows any theme */
+
+.cab_settings .cab_grid {
+    display: grid;
+    grid-template-columns: 1fr 90px;
+    gap: 4px 8px;
+    align-items: center;
+    margin: 6px 0;
+}
+.cab_settings .cab_grid input { margin: 0; }
+.cab_settings .cab_buttons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.cab_settings .cab_buttons .menu_button { width: auto; padding: 4px 10px; }
+.cab_settings .cab_note { display: block; opacity: 0.7; margin-top: 6px; }
+
+#cab_modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10050;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+}
+#cab_modal .cab_dialog {
+    width: min(820px, 100%);
+    max-height: min(88vh, 900px);
+    display: flex;
+    flex-direction: column;
+    background: var(--SmartThemeBlurTintColor, #222);
+    backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+    color: var(--SmartThemeBodyColor, #ddd);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+}
+#cab_modal .cab_head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #555);
+}
+#cab_modal .cab_head select { flex: 1; min-width: 0; margin: 0; }
+#cab_modal .cab_close { width: auto; margin: 0; }
+#cab_modal .cab_list { overflow-y: auto; padding: 6px 10px; flex: 1; }
+#cab_modal .cab_empty { padding: 24px; text-align: center; opacity: 0.7; }
+#cab_modal .cab_row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 4px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #555) 50%, transparent);
+}
+#cab_modal .cab_info { flex: 1; min-width: 0; }
+#cab_modal .cab_title { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-weight: 600; }
+#cab_modal .cab_count { opacity: 0.8; font-weight: 400; }
+#cab_modal .cab_tag {
+    font-size: 0.75em;
+    font-weight: 400;
+    padding: 1px 6px;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+}
+#cab_modal .cab_peak { border-color: var(--SmartThemeQuoteColor, #8c8); color: var(--SmartThemeQuoteColor, #8c8); }
+#cab_modal .cab_warn { border-color: #e0a030; color: #e0a030; }
+#cab_modal .cab_preview {
+    font-size: 0.9em;
+    opacity: 0.85;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#cab_modal .cab_sub { font-size: 0.8em; opacity: 0.6; }
+#cab_modal .cab_actions { display: flex; gap: 4px; flex-shrink: 0; }
+#cab_modal .cab_actions .menu_button { width: auto; margin: 0; padding: 4px 8px; white-space: nowrap; }
+#cab_modal .cab_foot {
+    padding: 8px 12px;
+    font-size: 0.8em;
+    opacity: 0.7;
+    border-top: 1px solid var(--SmartThemeBorderColor, #555);
+}
+
+@media (max-width: 600px) {
+    #cab_modal .cab_row { flex-direction: column; align-items: stretch; }
+    #cab_modal .cab_actions { justify-content: flex-end; }
+}
