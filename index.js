@@ -22,7 +22,12 @@ const DEFAULTS = Object.freeze({
     keepPeak: true,          // never prune the snapshot with the most messages
     shrinkWarn: true,        // warn when a loaded chat is much shorter than its backup
     notifyOnSave: false,     // toast on every backup
+    showIndicator: true,     // floating status button over the chat
+    indicatorFontSize: 12,   // px
+    indicatorPosition: 'top-right',
 });
+
+const INDICATOR_POSITIONS = ['top-right', 'top-left', 'bottom-right', 'bottom-left'];
 
 // ---------------------------------------------------------------- helpers
 
@@ -264,17 +269,20 @@ let pending = null;       // captured-but-not-yet-written snapshot
 let pendingTimer = null;
 let writing = Promise.resolve();
 const lastHashByKey = new Map();
+const inflightByKey = new Map(); // key -> number of writes queued/running
+let lastError = null;            // { key, message } of the most recent failed write
 
 function schedule() {
     const s = settings();
     if (!s.enabled) return;
     const snap = captureNow();
-    if (!snap) return;
+    if (!snap) { updateIndicator(); return; }
     // If a snapshot for a different chat is still pending, write it now.
     if (pending && pending.info.key !== snap.info.key) flush();
     pending = snap;
     clearTimeout(pendingTimer);
     pendingTimer = setTimeout(flush, Math.max(0, Number(s.debounceSec) || 0) * 1000);
+    updateIndicator();
 }
 
 function flush() {
@@ -283,7 +291,17 @@ function flush() {
     const snap = pending;
     pending = null;
     if (!snap) return writing;
-    writing = writing.then(() => store(snap)).catch(e => console.error(LOG, e));
+    const key = snap.info.key;
+    inflightByKey.set(key, (inflightByKey.get(key) || 0) + 1);
+    writing = writing
+        .then(() => store(snap))
+        .then(() => { if (lastError?.key === key) lastError = null; })
+        .catch(e => { console.error(LOG, e); lastError = { key, message: String(e?.message ?? e) }; })
+        .finally(() => {
+            const n = (inflightByKey.get(key) || 1) - 1;
+            if (n > 0) inflightByKey.set(key, n); else inflightByKey.delete(key);
+            updateIndicator();
+        });
     return writing;
 }
 
@@ -539,6 +557,7 @@ async function renderBrowser() {
             if (!confirm('ลบ snapshot นี้?')) return;
             await dbDelete([meta.id]);
             await renderBrowser();
+            updateIndicator();
         }));
     });
 
@@ -549,6 +568,84 @@ async function renderBrowser() {
         if (est?.quota) quota = ` · พื้นที่เบราว์เซอร์ใช้ ${fmtBytes(est.usage)} / ${fmtBytes(est.quota)}`;
     } catch { /* ignore */ }
     wrap.querySelector('#cab_foot').textContent = `${all.length} snapshots · ${chats.size} แชท · ${fmtBytes(total)}${quota}`;
+}
+
+// ---------------------------------------------------------------- floating status indicator
+//
+//   OK! #123        newest backup matches the chat on screen (messages #0–#123)
+//   Waiting... #120 changes not written yet — number is what IS backed up so far
+//   Attention! #123 chat on screen is much shorter than its backup, or a write failed
+//
+// Numbers follow SillyTavern's message ids, which start at #0.
+
+let indicatorSeq = 0;
+
+function ensureIndicator() {
+    let el = document.getElementById('cab_indicator');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'cab_indicator';
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    el.hidden = true;
+    el.addEventListener('click', () => openBrowser());
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBrowser(); } });
+    // Sit inside the chat column so it follows its width; fall back to the page.
+    (document.getElementById('sheld') ?? document.body).appendChild(el);
+    return el;
+}
+
+function applyIndicatorStyle(el = document.getElementById('cab_indicator')) {
+    if (!el) return;
+    const s = settings();
+    const size = Math.min(40, Math.max(8, Number(s.indicatorFontSize) || DEFAULTS.indicatorFontSize));
+    el.style.setProperty('--cab-font-size', `${size}px`);
+    const pos = INDICATOR_POSITIONS.includes(s.indicatorPosition) ? s.indicatorPosition : DEFAULTS.indicatorPosition;
+    el.dataset.pos = pos;
+    el.classList.toggle('cab_in_page', el.parentElement === document.body);
+}
+
+async function updateIndicator() {
+    const seq = ++indicatorSeq;
+    const el = ensureIndicator();
+    const s = settings();
+    applyIndicatorStyle(el);
+
+    const info = s.enabled && s.showIndicator ? currentChatInfo() : null;
+    const c = ctx();
+    const count = Array.isArray(c.chat) ? c.chat.length : 0;
+    if (!info || !count) { el.hidden = true; return; }
+
+    let list = [];
+    try { list = await dbMetaByKey(info.key); } catch (e) { console.error(LOG, e); }
+    if (seq !== indicatorSeq) return; // a newer update already ran
+
+    const newest = list[0];
+    const peak = list.reduce((a, b) => (!a || b.count > a.count ? b : a), null);
+    const busy = (pending && pending.info.key === info.key) || inflightByKey.has(info.key);
+    const lastId = m => (m ? `#${m.count - 1}` : '#–');
+
+    let state, label, num, tip;
+    if (lastError && lastError.key === info.key) {
+        state = 'attention'; label = 'Attention!'; num = lastId(newest);
+        tip = `บันทึก backup ไม่สำเร็จ: ${lastError.message}`;
+    } else if (peak && peak.count >= 6 && count < peak.count * 0.6) {
+        state = 'attention'; label = 'Attention!'; num = lastId(peak);
+        tip = `แชทบนจอมี ${count} ข้อความ แต่ backup มีถึง ${peak.count} ข้อความ (${fmtTime(peak.ts)}) — แชทอาจหาย/ไม่ครบ`;
+    } else if (busy || !newest || lastHashByKey.get(info.key) !== newest.hash) {
+        state = 'waiting'; label = 'Waiting...'; num = lastId(newest);
+        tip = newest
+            ? `กำลังรอบันทึก — backup ล่าสุดถึงข้อความ ${lastId(newest)} (${fmtTime(newest.ts)})`
+            : 'กำลังรอบันทึก — แชทนี้ยังไม่มี backup';
+    } else {
+        state = 'ok'; label = 'OK!'; num = lastId(newest);
+        tip = `backup ครบถึงข้อความ ${lastId(newest)} (${fmtTime(newest.ts)})`;
+    }
+
+    el.dataset.state = state;
+    el.textContent = `${label} ${num}`;
+    el.title = `${tip}\nคลิกเพื่อดู/กู้คืน`;
+    el.hidden = false;
 }
 
 // ---------------------------------------------------------------- settings panel
@@ -575,6 +672,19 @@ function renderSettings() {
                 <label class="checkbox_label" title="snapshot ที่มีข้อความมากที่สุดจะไม่ถูกลบ แม้จะเก่ากว่าจำนวนที่ตั้งไว้"><input type="checkbox" id="cab_keeppeak"> เก็บ snapshot ที่ยาวที่สุดไว้เสมอ</label>
                 <label class="checkbox_label"><input type="checkbox" id="cab_shrinkwarn"> เตือนเมื่อแชทที่โหลดมาสั้นกว่า backup</label>
                 <label class="checkbox_label"><input type="checkbox" id="cab_notify"> แจ้งเตือนทุกครั้งที่ backup</label>
+                <hr class="sysHR">
+                <label class="checkbox_label" title="OK! / Waiting... / Attention! ตามด้วยเลขข้อความสุดท้ายที่ backup แล้ว — คลิกปุ่มเพื่อเปิดรายการ backup"><input type="checkbox" id="cab_indicator_on"> แสดงปุ่มสถานะบนหน้าแชท</label>
+                <div class="cab_grid">
+                    <label for="cab_indicator_size">ขนาดตัวอักษรปุ่ม (px)</label>
+                    <input type="number" id="cab_indicator_size" class="text_pole" min="8" max="40" step="1">
+                    <label for="cab_indicator_pos">ตำแหน่งปุ่ม</label>
+                    <select id="cab_indicator_pos" class="text_pole">
+                        <option value="top-right">บนขวา</option>
+                        <option value="top-left">บนซ้าย</option>
+                        <option value="bottom-right">ล่างขวา</option>
+                        <option value="bottom-left">ล่างซ้าย</option>
+                    </select>
+                </div>
                 <div class="cab_buttons">
                     <div id="cab_now" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Backup ตอนนี้</div>
                     <div id="cab_open" class="menu_button"><i class="fa-solid fa-clock-rotate-left"></i> ดู/กู้คืน</div>
@@ -606,13 +716,39 @@ function renderSettings() {
             after?.();
         });
     };
-    bindCheck('cab_enabled', 'enabled', startTimer);
+    bindCheck('cab_enabled', 'enabled', () => { startTimer(); updateIndicator(); });
     bindCheck('cab_keeppeak', 'keepPeak');
     bindCheck('cab_shrinkwarn', 'shrinkWarn');
     bindCheck('cab_notify', 'notifyOnSave');
+    bindCheck('cab_indicator_on', 'showIndicator', updateIndicator);
     bindNum('cab_debounce', 'debounceSec');
     bindNum('cab_interval', 'intervalMin', startTimer);
     bindNum('cab_max', 'maxPerChat');
+
+    const sizeInput = $('cab_indicator_size');
+    sizeInput.value = s.indicatorFontSize;
+    sizeInput.addEventListener('input', e => {
+        const v = Number(e.target.value);
+        if (!Number.isFinite(v) || v < 8 || v > 40) return; // wait until the value is sensible
+        s.indicatorFontSize = v;
+        saveSettings();
+        applyIndicatorStyle();
+    });
+    sizeInput.addEventListener('change', e => {
+        const v = Math.min(40, Math.max(8, Math.round(Number(e.target.value)) || DEFAULTS.indicatorFontSize));
+        s.indicatorFontSize = v;
+        e.target.value = v;
+        saveSettings();
+        applyIndicatorStyle();
+    });
+
+    const posSelect = $('cab_indicator_pos');
+    posSelect.value = INDICATOR_POSITIONS.includes(s.indicatorPosition) ? s.indicatorPosition : DEFAULTS.indicatorPosition;
+    posSelect.addEventListener('change', e => {
+        s.indicatorPosition = e.target.value;
+        saveSettings();
+        applyIndicatorStyle();
+    });
 
     $('cab_now').addEventListener('click', backupNow);
     $('cab_open').addEventListener('click', () => openBrowser());
@@ -623,6 +759,7 @@ function renderSettings() {
         e.target.value = '';
         if (!f) return;
         try { toast.ok(`นำเข้า ${await importFile(f)} snapshots`); } catch (err) { toast.err(String(err.message ?? err)); }
+        updateIndicator();
     });
 }
 
@@ -634,11 +771,14 @@ async function backupNow() {
     try {
         await writing;
         const r = await store(snap, { force: true, reason: 'manual' });
+        if (lastError?.key === snap.info.key) lastError = null;
         toast.ok(`${snap.info.label}: ${snap.count} ข้อความ`, r.skipped ? 'ไม่มีอะไรเปลี่ยน' : 'Backup แล้ว');
     } catch (e) {
         console.error(LOG, e);
+        lastError = { key: snap.info.key, message: String(e.message ?? e) };
         toast.err(String(e.message ?? e));
     }
+    updateIndicator();
 }
 
 // ---------------------------------------------------------------- wiring
@@ -677,6 +817,7 @@ function wireEvents() {
                 const snap = captureNow();
                 if (snap) { pending = snap; flush(); }
             }
+            updateIndicator();
         });
     }
 
@@ -694,10 +835,11 @@ async function init() {
     // Ask the browser not to evict our data under storage pressure.
     try { await navigator.storage?.persist?.(); } catch { /* ignore */ }
     try { await db(); } catch (e) { toast.err('เปิด IndexedDB ไม่ได้: ' + (e?.message ?? e)); }
+    updateIndicator();
     console.log(LOG, 'loaded');
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator };
 
 if (typeof jQuery === 'function') jQuery(init); else init();
