@@ -24,10 +24,14 @@ const DEFAULTS = Object.freeze({
     notifyOnSave: false,     // toast on every backup
     showIndicator: true,     // floating status button over the chat
     indicatorFontSize: 12,   // px
-    indicatorPosition: 'top-right',
+    // Where the floating button sits. x/y are fractions (0–1) of the space the
+    // button can travel across the screen; `edge` is the screen edge it is
+    // snapped to (null = free, e.g. after "reset to centre").
+    indicatorPos: Object.freeze({ x: 1, y: 0.08, edge: 'right' }),
 });
 
-const INDICATOR_POSITIONS = ['top-right', 'top-left', 'bottom-right', 'bottom-left'];
+const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
+const EDGE_MARGIN = 8; // px gap between the snapped button and the screen edge
 
 // ---------------------------------------------------------------- helpers
 
@@ -36,10 +40,17 @@ const ctx = () => SillyTavern.getContext();
 function settings() {
     const ext = ctx().extensionSettings;
     if (!ext[MODULE]) ext[MODULE] = {};
-    for (const [k, v] of Object.entries(DEFAULTS)) {
-        if (ext[MODULE][k] === undefined) ext[MODULE][k] = v;
+    const s = ext[MODULE];
+    // v1.1 stored a fixed corner; carry it over to the draggable position.
+    if (s.indicatorPosition !== undefined && s.indicatorPos === undefined) {
+        const [v, h] = String(s.indicatorPosition).split('-');
+        s.indicatorPos = { x: h === 'left' ? 0 : 1, y: v === 'bottom' ? 0.85 : 0.08, edge: h === 'left' ? 'left' : 'right' };
     }
-    return ext[MODULE];
+    delete s.indicatorPosition;
+    for (const [k, v] of Object.entries(DEFAULTS)) {
+        if (s[k] === undefined) s[k] = (v && typeof v === 'object') ? { ...v } : v;
+    }
+    return s;
 }
 
 function saveSettings() {
@@ -469,7 +480,8 @@ let browserKey = null; // null = all chats
 async function openBrowser(key) {
     await flush();
     browserKey = key === undefined ? (currentChatInfo()?.key ?? null) : key;
-    document.getElementById('cab_modal')?.remove();
+    const old = document.getElementById('cab_modal');
+    if (old) (old._cabClose ?? (() => old.remove()))();
 
     const wrap = document.createElement('div');
     wrap.id = 'cab_modal';
@@ -485,8 +497,32 @@ async function openBrowser(key) {
         </div>`;
     document.body.appendChild(wrap);
 
-    wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
-    wrap.querySelector('.cab_close').addEventListener('click', () => wrap.remove());
+    // Match the *visible* viewport (mobile address bar / keyboard shrink it),
+    // so the dialog — and its close button — can never sit off-screen.
+    const vv = window.visualViewport;
+    const fit = () => {
+        wrap.style.top = `${vv ? vv.offsetTop : 0}px`;
+        wrap.style.left = `${vv ? vv.offsetLeft : 0}px`;
+        wrap.style.width = `${vv ? vv.width : window.innerWidth}px`;
+        wrap.style.height = `${vv ? vv.height : window.innerHeight}px`;
+    };
+    fit();
+    vv?.addEventListener('resize', fit);
+    vv?.addEventListener('scroll', fit);
+    window.addEventListener('resize', fit);
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    function close() {
+        vv?.removeEventListener('resize', fit);
+        vv?.removeEventListener('scroll', fit);
+        window.removeEventListener('resize', fit);
+        document.removeEventListener('keydown', onKey);
+        wrap.remove();
+    }
+
+    wrap._cabClose = close;
+    wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+    wrap.querySelector('.cab_close').addEventListener('click', close);
     wrap.querySelector('#cab_scope').addEventListener('change', e => {
         browserKey = e.target.value || null;
         renderBrowser();
@@ -588,21 +624,122 @@ function ensureIndicator() {
     el.setAttribute('role', 'button');
     el.tabIndex = 0;
     el.hidden = true;
-    el.addEventListener('click', () => openBrowser());
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBrowser(); } });
-    // Sit inside the chat column so it follows its width; fall back to the page.
-    (document.getElementById('sheld') ?? document.body).appendChild(el);
+    makeDraggable(el);
+    // Fixed to the screen (not the chat column) so it can be parked anywhere.
+    document.body.appendChild(el);
+
+    const reflow = () => placeIndicator();
+    window.addEventListener('resize', reflow);
+    window.visualViewport?.addEventListener('resize', reflow);
     return el;
+}
+
+function viewportSize() {
+    const vv = window.visualViewport;
+    return { vw: vv?.width ?? window.innerWidth, vh: vv?.height ?? window.innerHeight };
+}
+
+function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+function normPos(p) {
+    const x = clamp(Number(p?.x), 0, 1), y = clamp(Number(p?.y), 0, 1);
+    const edge = ['left', 'right', 'top', 'bottom'].includes(p?.edge) ? p.edge : null;
+    return { x: Number.isFinite(x) ? x : 1, y: Number.isFinite(y) ? y : 0.08, edge };
+}
+
+/** Put the button where settings say, always fully inside the visible screen. */
+function placeIndicator(el = document.getElementById('cab_indicator')) {
+    if (!el || el.hidden || el.classList.contains('cab_dragging')) return;
+    const { vw, vh } = viewportSize();
+    const w = el.offsetWidth, h = el.offsetHeight;
+    const travelX = Math.max(0, vw - w - 2 * EDGE_MARGIN);
+    const travelY = Math.max(0, vh - h - 2 * EDGE_MARGIN);
+    const p = normPos(settings().indicatorPos);
+    let left = EDGE_MARGIN + p.x * travelX;
+    let top = EDGE_MARGIN + p.y * travelY;
+    if (p.edge === 'left') left = EDGE_MARGIN;
+    if (p.edge === 'right') left = EDGE_MARGIN + travelX;
+    if (p.edge === 'top') top = EDGE_MARGIN;
+    if (p.edge === 'bottom') top = EDGE_MARGIN + travelY;
+    el.style.left = `${Math.round(left)}px`;
+    el.style.top = `${Math.round(top)}px`;
+    el.dataset.edge = p.edge ?? 'none';
+}
+
+/** Drag with mouse or finger; on release snap to the nearest screen edge. A tap still opens the list. */
+function makeDraggable(el) {
+    const THRESHOLD = 6; // px of movement before a press counts as a drag
+    let start = null;
+    let dragged = false;
+
+    el.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, id: e.pointerId };
+        dragged = false;
+        try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    });
+
+    el.addEventListener('pointermove', e => {
+        if (!start || e.pointerId !== start.id) return;
+        const dx = e.clientX - start.x, dy = e.clientY - start.y;
+        if (!dragged && Math.hypot(dx, dy) < THRESHOLD) return;
+        dragged = true;
+        el.classList.add('cab_dragging');
+        const { vw, vh } = viewportSize();
+        el.style.left = `${clamp(start.left + dx, 0, Math.max(0, vw - el.offsetWidth))}px`;
+        el.style.top = `${clamp(start.top + dy, 0, Math.max(0, vh - el.offsetHeight))}px`;
+    });
+
+    const end = e => {
+        if (!start || e.pointerId !== start.id) return;
+        try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+        start = null;
+        if (!dragged) {
+            if (e.type === 'pointerup') openBrowser();
+            return;
+        }
+        el.classList.remove('cab_dragging');
+        if (e.type === 'pointerup') snapIndicator(el);
+        placeIndicator(el);
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+}
+
+function snapIndicator(el) {
+    const { vw, vh } = viewportSize();
+    const r = el.getBoundingClientRect();
+    const dist = { left: r.left, right: vw - r.right, top: r.top, bottom: vh - r.bottom };
+    const edge = Object.keys(dist).reduce((a, b) => (dist[b] < dist[a] ? b : a));
+    const travelX = Math.max(1, vw - r.width - 2 * EDGE_MARGIN);
+    const travelY = Math.max(1, vh - r.height - 2 * EDGE_MARGIN);
+    const pos = {
+        x: clamp((r.left - EDGE_MARGIN) / travelX, 0, 1),
+        y: clamp((r.top - EDGE_MARGIN) / travelY, 0, 1),
+        edge,
+    };
+    if (edge === 'left') pos.x = 0;
+    if (edge === 'right') pos.x = 1;
+    if (edge === 'top') pos.y = 0;
+    if (edge === 'bottom') pos.y = 1;
+    settings().indicatorPos = pos;
+    saveSettings();
+}
+
+function resetIndicatorPosition() {
+    settings().indicatorPos = { ...INDICATOR_CENTER };
+    saveSettings();
+    placeIndicator();
 }
 
 function applyIndicatorStyle(el = document.getElementById('cab_indicator')) {
     if (!el) return;
     const s = settings();
-    const size = Math.min(40, Math.max(8, Number(s.indicatorFontSize) || DEFAULTS.indicatorFontSize));
+    const size = clamp(Number(s.indicatorFontSize) || DEFAULTS.indicatorFontSize, 8, 40);
     el.style.setProperty('--cab-font-size', `${size}px`);
-    const pos = INDICATOR_POSITIONS.includes(s.indicatorPosition) ? s.indicatorPosition : DEFAULTS.indicatorPosition;
-    el.dataset.pos = pos;
-    el.classList.toggle('cab_in_page', el.parentElement === document.body);
+    placeIndicator(el); // size change moves the edges
 }
 
 async function updateIndicator() {
@@ -644,8 +781,9 @@ async function updateIndicator() {
 
     el.dataset.state = state;
     el.textContent = `${label} ${num}`;
-    el.title = `${tip}\nคลิกเพื่อดู/กู้คืน`;
+    el.title = `${tip}\nคลิกเพื่อดู/กู้คืน · ลากเพื่อย้ายตำแหน่ง`;
     el.hidden = false;
+    placeIndicator(el); // text width may have changed
 }
 
 // ---------------------------------------------------------------- settings panel
@@ -677,14 +815,11 @@ function renderSettings() {
                 <div class="cab_grid">
                     <label for="cab_indicator_size">ขนาดตัวอักษรปุ่ม (px)</label>
                     <input type="number" id="cab_indicator_size" class="text_pole" min="8" max="40" step="1">
-                    <label for="cab_indicator_pos">ตำแหน่งปุ่ม</label>
-                    <select id="cab_indicator_pos" class="text_pole">
-                        <option value="top-right">บนขวา</option>
-                        <option value="top-left">บนซ้าย</option>
-                        <option value="bottom-right">ล่างขวา</option>
-                        <option value="bottom-left">ล่างซ้าย</option>
-                    </select>
                 </div>
+                <div class="cab_buttons">
+                    <div id="cab_indicator_reset" class="menu_button" title="ย้ายปุ่มสถานะกลับมากลางจอ (ใช้เมื่อปุ่มหลุดไปอยู่ที่หาไม่เจอ)"><i class="fa-solid fa-crosshairs"></i> รีเซ็ตตำแหน่งปุ่ม</div>
+                </div>
+                <small class="cab_note">ลากปุ่มสถานะไปวางตรงไหนก็ได้ ปล่อยแล้วจะดูดติดขอบจอที่ใกล้ที่สุด</small>
                 <div class="cab_buttons">
                     <div id="cab_now" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Backup ตอนนี้</div>
                     <div id="cab_open" class="menu_button"><i class="fa-solid fa-clock-rotate-left"></i> ดู/กู้คืน</div>
@@ -742,12 +877,10 @@ function renderSettings() {
         applyIndicatorStyle();
     });
 
-    const posSelect = $('cab_indicator_pos');
-    posSelect.value = INDICATOR_POSITIONS.includes(s.indicatorPosition) ? s.indicatorPosition : DEFAULTS.indicatorPosition;
-    posSelect.addEventListener('change', e => {
-        s.indicatorPosition = e.target.value;
-        saveSettings();
-        applyIndicatorStyle();
+    $('cab_indicator_reset').addEventListener('click', () => {
+        resetIndicatorPosition();
+        const el = document.getElementById('cab_indicator');
+        if (!el || el.hidden) toast.info('ตั้งตำแหน่งไว้กลางจอแล้ว ปุ่มจะขึ้นเมื่อเปิดแชทที่มีข้อความ');
     });
 
     $('cab_now').addEventListener('click', backupNow);
