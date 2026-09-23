@@ -150,3 +150,27 @@
     #cab_indicator { transition: background-color 0.15s; }
     #cab_indicator[data-state="attention"] { animation: none; }
 }
+
+/* ---------------------------------------------------------------- v1.3: change summary, full-text view */
+#cab_modal .cab_changes {
+    font-size: 0.85em;
+    color: var(--SmartThemeQuoteColor, #e18a24);
+    margin: 1px 0 2px;
+}
+#cab_modal .cab_merged { opacity: 0.75; }
+#cab_modal .cab_preview { cursor: pointer; }
+#cab_modal .cab_preview[hidden], #cab_modal .cab_full[hidden] { display: none; }
+#cab_modal .cab_full {
+    font-size: 0.9em;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 45vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    margin: 3px 0;
+    padding: 6px 8px;
+    border-left: 2px solid var(--SmartThemeQuoteColor, #e18a24);
+    background: color-mix(in srgb, var(--SmartThemeBorderColor, #555) 15%, transparent);
+    border-radius: 4px;
+    cursor: pointer;
+}

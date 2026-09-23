@@ -9,9 +9,12 @@
 
 const MODULE = 'chat_autobackup';
 const DB_NAME = 'ST_ChatAutoBackup';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const META = 'meta';
 const PAYLOAD = 'payload';
+const SIGS = 'sigs';        // per-snapshot message signatures, used to describe what changed
+const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
+const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
 
 const DEFAULTS = Object.freeze({
@@ -22,6 +25,7 @@ const DEFAULTS = Object.freeze({
     keepPeak: true,          // never prune the snapshot with the most messages
     shrinkWarn: true,        // warn when a loaded chat is much shorter than its backup
     notifyOnSave: false,     // toast on every backup
+    mergeSwipes: true,       // replace the newest snapshot when only the last message's swipes changed
     showIndicator: true,     // floating status button over the chat
     indicatorFontSize: 12,   // px
     // Where the floating button sits. x/y are fractions (0–1) of the space the
@@ -150,8 +154,17 @@ function db() {
             if (!d.objectStoreNames.contains(PAYLOAD)) {
                 d.createObjectStore(PAYLOAD, { keyPath: 'id' });
             }
+            if (!d.objectStoreNames.contains(SIGS)) {
+                d.createObjectStore(SIGS, { keyPath: 'id' });
+            }
         };
-        req.onsuccess = () => resolve(req.result);
+        req.onblocked = () => toast.warn('มีแท็บ SillyTavern อื่นที่ยังใช้ extension เวอร์ชันเก่าอยู่ — ปิดหรือรีเฟรชแท็บนั้นก่อน');
+        req.onsuccess = () => {
+            const d = req.result;
+            // Let a newer version in another tab upgrade the database.
+            d.onversionchange = () => { d.close(); dbPromise = null; };
+            resolve(d);
+        };
         req.onerror = () => { dbPromise = null; reject(req.error); };
     });
     return dbPromise;
@@ -165,13 +178,34 @@ function txDone(tx) {
     return new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error); });
 }
 
-async function dbAdd(meta, payload) {
+async function dbAdd(meta, payload, sigs) {
     const d = await db();
-    const tx = d.transaction([META, PAYLOAD], 'readwrite');
+    const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
     const id = await reqP(tx.objectStore(META).add(meta));
     tx.objectStore(PAYLOAD).put({ id, ...payload });
+    if (sigs) tx.objectStore(SIGS).put({ id, head: sigs.head, msgs: sigs.msgs });
     await txDone(tx);
     return id;
+}
+
+async function dbPutMeta(meta, sigs) {
+    const d = await db();
+    const tx = d.transaction([META, SIGS], 'readwrite');
+    tx.objectStore(META).put(meta);
+    if (sigs) tx.objectStore(SIGS).put({ id: meta.id, head: sigs.head, msgs: sigs.msgs });
+    await txDone(tx);
+}
+
+async function dbGetSigs(id) {
+    const d = await db();
+    const tx = d.transaction(SIGS, 'readonly');
+    return await reqP(tx.objectStore(SIGS).get(id));
+}
+
+async function dbAllSigs() {
+    const d = await db();
+    const tx = d.transaction(SIGS, 'readonly');
+    return await reqP(tx.objectStore(SIGS).getAll());
 }
 
 async function dbMetaByKey(key) {
@@ -197,12 +231,155 @@ async function dbPayload(id) {
 async function dbDelete(ids) {
     if (!ids.length) return;
     const d = await db();
-    const tx = d.transaction([META, PAYLOAD], 'readwrite');
+    const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
     for (const id of ids) {
         tx.objectStore(META).delete(id);
         tx.objectStore(PAYLOAD).delete(id);
+        tx.objectStore(SIGS).delete(id);
     }
     await txDone(tx);
+}
+
+// ---------------------------------------------------------------- message text & signatures
+
+// HTML formatting tags: drop the tag, keep the words inside. Every other tag —
+// <scene>, <status>, <thinking>, <details>, <div>… (usually regex-rendered
+// blocks) — is dropped together with its content.
+const INLINE_TAGS = ['a', 'abbr', 'b', 'big', 'blockquote', 'br', 'center', 'cite', 'code', 'del', 'em', 'font',
+    'hr', 'i', 'ins', 'kbd', 'mark', 'p', 'q', 'rp', 'rt', 'ruby', 's', 'small', 'span', 'strike', 'strong',
+    'sub', 'sup', 'tt', 'u', 'wbr'];
+const BLOCK_RE = new RegExp(`<(?!(?:${INLINE_TAGS.join('|')})(?=[\\s/>]))([a-zA-Z][\\w:-]*)(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>`, 'gi');
+const ANY_TAG_RE = /<\/?[a-zA-Z][^>]*>/g;
+
+function decodeEntities(t) {
+    return t.replace(/&(nbsp|amp|lt|gt|quot|#39|apos);/g, (_, e) => ({ nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'" }[e]));
+}
+
+/** Readable text of a message for previews: tag blocks removed, formatting tags unwrapped. */
+function cleanText(text, { keepLines = false } = {}) {
+    const src = String(text ?? '').replace(/<!--[\s\S]*?-->/g, '');
+    const finish = t => {
+        t = t.replace(/<br\s*\/?>/gi, '\n').replace(/<\/p\s*>/gi, '\n').replace(ANY_TAG_RE, '');
+        t = decodeEntities(t);
+        return keepLines
+            ? t.replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+            : t.replace(/\s+/g, ' ').trim();
+    };
+    let out = src;
+    for (let i = 0; i < 25; i++) { // repeat for nested blocks
+        const next = out.replace(BLOCK_RE, ' ');
+        if (next === out) break;
+        out = next;
+    }
+    // Whole message wrapped in one custom tag? Then keep the words instead of nothing.
+    return finish(out) || finish(src);
+}
+
+/** mes-hash | swipe count | selected swipe | whole-message hash */
+function msgSig(m, json) {
+    const sw = Array.isArray(m?.swipes) ? m.swipes.length : 0;
+    return `${hash(String(m?.mes ?? ''))}|${sw}|${Number(m?.swipe_id) || 0}|${hash(json)}`;
+}
+
+function sigHash(sigs) {
+    return hash(`${sigs.head}\n${sigs.msgs.join('\n')}`);
+}
+
+function lastMsgInfo(m) {
+    const sw = Array.isArray(m?.swipes) ? m.swipes.length : 0;
+    return {
+        preview: cleanText(m?.mes).slice(0, PREVIEW_LEN),
+        previewName: m?.name ?? '',
+        swipe: sw > 1 ? [(Number(m.swipe_id) || 0) + 1, sw] : null,
+    };
+}
+
+/** Rebuild signatures + preview from a stored JSONL snapshot. */
+function deriveFromJsonl(text) {
+    const lines = String(text).split('\n').filter(l => l.trim());
+    let head = '';
+    let start = 0;
+    if (lines.length) {
+        const first = JSON.parse(lines[0]);
+        if (first && typeof first === 'object' && !('mes' in first)) { head = hash(lines[0]); start = 1; }
+    }
+    const msgs = [];
+    let last = null;
+    for (let i = start; i < lines.length; i++) {
+        last = JSON.parse(lines[i]);
+        msgs.push(msgSig(last, lines[i]));
+    }
+    const sigs = { head, msgs };
+    return { sigs, hash: sigHash(sigs), count: msgs.length, ...lastMsgInfo(last) };
+}
+
+function fmtIds(ids) {
+    const parts = [];
+    for (let i = 0; i < ids.length; i++) {
+        let j = i;
+        while (j + 1 < ids.length && ids[j + 1] === ids[j] + 1) j++;
+        parts.push(j > i ? `#${ids[i]}–#${ids[j]}` : `#${ids[i]}`);
+        i = j;
+    }
+    return parts.length > 3 ? `${parts.slice(0, 3).join(', ')} …` : parts.join(', ');
+}
+
+/** Human summary of what changed between two snapshots of the same chat. */
+function describeChanges(prev, cur) {
+    const A = prev.msgs, B = cur.msgs;
+    let p = 0;
+    while (p < A.length && p < B.length && A[p] === B[p]) p++;
+    let q = 0;
+    while (q < A.length - p && q < B.length - p && A[A.length - 1 - q] === B[B.length - 1 - q]) q++;
+    const aEnd = A.length - q, bEnd = B.length - q;
+    const pairs = Math.min(aEnd, bEnd) - p;
+
+    const out = [];
+    const edits = [];
+    const swipes = [];
+    for (let k = 0; k < pairs; k++) {
+        const i = p + k;
+        const [, aSw, aSid] = A[i].split('|').map(Number);
+        const [, bSw, bSid] = B[i].split('|').map(Number);
+        if (bSw > aSw && bSw > 1) swipes.push(`+${bSw - aSw} swipe ที่ #${i} (เลือก ${bSid + 1}/${bSw})`);
+        else if (bSw < aSw && aSw > 1) swipes.push(`ลบ swipe ที่ #${i} (เหลือ ${bSw})`);
+        else if (bSid !== aSid && bSw > 1) swipes.push(`เปลี่ยนไปใช้ swipe ${bSid + 1}/${bSw} ที่ #${i}`);
+        else edits.push(i);
+    }
+    if (bEnd - p > pairs) {
+        const from = p + pairs, to = bEnd - 1;
+        out.push(`+${to - from + 1} ข้อความ (${fmtIds(from === to ? [from] : [from, to]).replace(', ', '–')})`);
+    }
+    if (aEnd - p > pairs) {
+        const from = p + pairs, to = aEnd - 1;
+        out.push(`ลบ ${to - from + 1} ข้อความ (${fmtIds(from === to ? [from] : [from, to]).replace(', ', '–')})`);
+    }
+    out.push(...swipes);
+    if (edits.length) out.push(`แก้ ${fmtIds(edits)}`);
+    if (!out.length) out.push(prev.head !== cur.head ? 'ข้อมูลแชทเปลี่ยน (ไม่มีข้อความเปลี่ยน)' : 'ไม่มีอะไรเปลี่ยน');
+    return out;
+}
+
+/** Signatures for a snapshot, rebuilding them (and its preview) for snapshots made before v1.3. */
+async function getSigs(meta) {
+    if ((meta.sv || 0) >= SNAP_VERSION) {
+        const rec = await dbGetSigs(meta.id);
+        if (rec) return rec;
+    }
+    return await upgradeSnapshot(meta);
+}
+
+async function upgradeSnapshot(meta) {
+    const d = deriveFromJsonl(await snapshotText(meta.id));
+    Object.assign(meta, {
+        hash: d.hash,
+        preview: d.preview,
+        previewName: d.previewName,
+        swipe: d.swipe,
+        sv: SNAP_VERSION,
+    });
+    await dbPutMeta(meta, d.sigs);
+    return { id: meta.id, ...d.sigs };
 }
 
 // ---------------------------------------------------------------- snapshot capture
@@ -238,6 +415,14 @@ function currentChatInfo() {
     };
 }
 
+// A chat whose first message has no send_date still needs a fixed header date,
+// otherwise every capture would look like a change.
+const createDateByKey = new Map();
+function stableCreateDate(key) {
+    if (!createDateByKey.has(key)) createDateByKey.set(key, fileStamp(Date.now()));
+    return createDateByKey.get(key);
+}
+
 /**
  * Synchronously serialize the open chat into JSONL (same layout SillyTavern
  * writes to disk: header line for character chats, then one message per line).
@@ -251,25 +436,33 @@ function captureNow() {
     if (!messages.length) return null;
 
     const lines = [];
+    let head = '';
     if (info.type === 'character') {
-        lines.push(JSON.stringify({
+        const h = JSON.stringify({
             user_name: c.name1,
             character_name: c.name2,
-            create_date: messages[0]?.send_date ?? fileStamp(Date.now()),
+            create_date: messages[0]?.send_date ?? stableCreateDate(info.key),
             chat_metadata: c.chatMetadata ?? c.chat_metadata ?? {},
-        }));
+        });
+        lines.push(h);
+        head = hash(h);
     }
-    for (const m of messages) lines.push(JSON.stringify(m));
+    const msgs = [];
+    for (const m of messages) {
+        const j = JSON.stringify(m);
+        lines.push(j);
+        msgs.push(msgSig(m, j));
+    }
     const jsonl = lines.join('\n');
+    const sigs = { head, msgs };
 
-    const last = messages[messages.length - 1];
     return {
         info,
         jsonl,
-        hash: hash(jsonl),
+        sigs,
+        hash: sigHash(sigs),
         count: messages.length,
-        preview: String(last?.mes ?? '').replace(/\s+/g, ' ').slice(0, 140),
-        previewName: last?.name ?? '',
+        ...lastMsgInfo(messages[messages.length - 1]),
         ts: Date.now(),
     };
 }
@@ -322,9 +515,20 @@ async function store(snap, { force = false, reason = 'auto' } = {}) {
     const existing = await dbMetaByKey(info.key);
     const newest = existing[0];
 
+    // Snapshots from before v1.3 used a different hash; bring the newest one up to date first.
+    if (newest && (newest.sv || 0) < SNAP_VERSION) {
+        try { await upgradeSnapshot(newest); } catch (e) { console.warn(LOG, e); }
+    }
+
     if (!force && (lastHashByKey.get(info.key) === snap.hash || newest?.hash === snap.hash)) {
         lastHashByKey.set(info.key, snap.hash);
         return { skipped: true };
+    }
+
+    const s = settings();
+    let mergeInto = null;
+    if (!force && reason === 'auto' && s.mergeSwipes && newest && newest.reason === 'auto' && newest.count === snap.count) {
+        try { if (await onlyLastSwipesGrew(newest, snap)) mergeInto = newest; } catch (e) { console.warn(LOG, e); }
     }
 
     const peak = existing.reduce((m, x) => Math.max(m, x.count), 0);
@@ -344,18 +548,42 @@ async function store(snap, { force = false, reason = 'auto' } = {}) {
         count: snap.count,
         preview: snap.preview,
         previewName: snap.previewName,
+        swipe: snap.swipe,
         rawSize: snap.jsonl.length,
         size,
         reason,
         shrunk,
+        mergedSwipes: mergeInto ? (mergeInto.mergedSwipes || 0) + 1 : 0,
+        sv: SNAP_VERSION,
     };
-    const id = await dbAdd(meta, packed);
+    const id = await dbAdd(meta, packed, snap.sigs);
+    if (mergeInto) await dbDelete([mergeInto.id]);
     lastHashByKey.set(info.key, snap.hash);
 
     await prune(info.key);
 
     if (settings().notifyOnSave) toast.info(`${info.label}: ${snap.count} ข้อความ`, 'Backup แล้ว');
     return { id, meta };
+}
+
+/**
+ * True when the new snapshot differs from `prevMeta` only in the last message's
+ * swipes, and every swipe text of the old one is still there (or only grew, as
+ * while a swipe is streaming) — so the old snapshot holds nothing the new one lacks.
+ */
+async function onlyLastSwipesGrew(prevMeta, snap) {
+    const prev = await getSigs(prevMeta);
+    const A = prev.msgs, B = snap.sigs.msgs, n = B.length;
+    if (prev.head !== snap.sigs.head || A.length !== n || n === 0) return false;
+    for (let i = 0; i < n - 1; i++) if (A[i] !== B[i]) return false;
+
+    const lastOf = t => { const s = String(t).trimEnd(); return JSON.parse(s.slice(s.lastIndexOf('\n') + 1)); };
+    const oldLast = lastOf(await snapshotText(prevMeta.id));
+    const newLast = lastOf(snap.jsonl);
+    const swipesOf = m => (Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.mes ?? '']).map(x => String(x ?? ''));
+    const oldSw = swipesOf(oldLast), newSw = swipesOf(newLast);
+    if (newSw.length < 2 || newSw.length < oldSw.length) return false;
+    return oldSw.every((t, i) => newSw[i].startsWith(t));
 }
 
 async function prune(key) {
@@ -455,18 +683,22 @@ async function importFile(file) {
     const data = JSON.parse(await file.text());
     if (data?.format !== 'st-chat-autobackup' || !Array.isArray(data.snapshots)) throw new Error('ไฟล์ไม่ใช่ export ของ Chat Auto Backup');
     const all = await dbAllMeta();
+    for (const m of all) if ((m.sv || 0) < SNAP_VERSION) { try { await upgradeSnapshot(m); } catch (e) { console.warn(LOG, e); } }
     const seen = new Set(all.map(m => `${m.key}|${m.hash}`));
     let added = 0;
     for (const { meta, jsonl } of data.snapshots) {
         if (!meta?.key || typeof jsonl !== 'string') continue;
-        const h = meta.hash ?? hash(jsonl);
+        let d;
+        try { d = deriveFromJsonl(jsonl); } catch { continue; }
+        const h = d.hash;
         if (seen.has(`${meta.key}|${h}`)) continue;
         const { id: _drop, ...clean } = meta;
         const packed = await pack(jsonl);
-        clean.hash = h;
+        Object.assign(clean, { hash: h, count: d.count, preview: d.preview, previewName: d.previewName, swipe: d.swipe, sv: SNAP_VERSION });
         clean.size = packed.enc === 'gzip' ? packed.data.size : jsonl.length;
+        clean.rawSize = jsonl.length;
         clean.reason = 'import';
-        await dbAdd(clean, packed);
+        await dbAdd(clean, packed, d.sigs);
         seen.add(`${meta.key}|${h}`);
         added++;
     }
@@ -554,21 +786,53 @@ async function renderBrowser() {
     if (!rows.length) {
         list.innerHTML = '<div class="cab_empty">ยังไม่มี backup สำหรับแชทนี้</div>';
     } else {
-        const peakByKey = new Map();
-        for (const m of all) if (!peakByKey.has(m.key) || m.count > peakByKey.get(m.key)) peakByKey.set(m.key, m.count);
-        list.innerHTML = rows.map(m => `
+        // One-time rebuild of previews/signatures for snapshots made before v1.3.
+        const old = rows.filter(m => (m.sv || 0) < SNAP_VERSION);
+        for (let i = 0; i < old.length; i++) {
+            list.innerHTML = `<div class="cab_empty">กำลังเตรียมข้อมูล snapshot เก่า… ${i + 1}/${old.length}</div>`;
+            try { await upgradeSnapshot(old[i]); } catch (e) { console.warn(LOG, 'upgrade failed', old[i].id, e); }
+        }
+        if (document.getElementById('cab_modal') !== wrap) return;
+
+        const sigsById = new Map();
+        try { for (const r of await dbAllSigs()) sigsById.set(r.id, r); } catch (e) { console.warn(LOG, e); }
+
+        // previous (older) snapshot of the same chat, and the one snapshot the pruner always keeps
+        const prevById = new Map();
+        const peakIdByKey = new Map();
+        const byKey = new Map();
+        for (const m of all) (byKey.get(m.key) ?? byKey.set(m.key, []).get(m.key)).push(m);
+        for (const [k, list2] of byKey) {
+            const asc = [...list2].sort((a, b) => a.ts - b.ts);
+            asc.forEach((m, i) => prevById.set(m.id, asc[i - 1] ?? null));
+            const peak = list2.reduce((a, b) => (b.count > a.count || (b.count === a.count && b.ts > a.ts) ? b : a));
+            peakIdByKey.set(k, peak.id);
+        }
+        const changesOf = m => {
+            const prev = prevById.get(m.id);
+            if (!prev) return 'snapshot เก่าสุดที่เก็บไว้';
+            const a = sigsById.get(prev.id), b = sigsById.get(m.id);
+            return a && b ? describeChanges(a, b).join(' · ') : '';
+        };
+
+        list.innerHTML = rows.map(m => {
+            const changes = changesOf(m);
+            return `
             <div class="cab_row" data-id="${m.id}">
                 <div class="cab_info">
                     <div class="cab_title">
                         <span>${fmtTime(m.ts)}</span>
                         <span class="cab_count">${m.count} ข้อความ</span>
-                        ${m.count === peakByKey.get(m.key) ? '<span class="cab_tag cab_peak" title="snapshot ที่มีข้อความมากที่สุดของแชทนี้ — ไม่ถูกลบอัตโนมัติ">สูงสุด</span>' : ''}
+                        ${m.swipe ? `<span class="cab_tag" title="ข้อความล่าสุดมี ${m.swipe[1]} swipe ขณะนั้นเลือกอันที่ ${m.swipe[0]} — กู้คืนแล้วได้ครบทุก swipe">swipe ${m.swipe[0]}/${m.swipe[1]}</span>` : ''}
+                        ${peakIdByKey.get(m.key) === m.id ? '<span class="cab_tag cab_peak" title="snapshot ที่มีข้อความมากที่สุดของแชทนี้ — ไม่ถูกลบอัตโนมัติ">สูงสุด</span>' : ''}
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
                         ${m.reason === 'import' ? '<span class="cab_tag">import</span>' : ''}
                     </div>
                     ${browserKey ? '' : `<div class="cab_sub">${escapeHtml(m.label)} — ${escapeHtml(m.chatId)}</div>`}
-                    <div class="cab_preview"><b>${escapeHtml(m.previewName)}:</b> ${escapeHtml(m.preview)}</div>
+                    ${changes ? `<div class="cab_changes" title="เทียบกับ snapshot ก่อนหน้าของแชทนี้">${escapeHtml(changes)}${m.mergedSwipes ? ` <span class="cab_merged">(รวม swipe ไว้ ${m.mergedSwipes} ครั้ง)</span>` : ''}</div>` : ''}
+                    <div class="cab_preview" title="แตะเพื่ออ่านข้อความล่าสุดทั้งข้อความ"><b>${escapeHtml(m.previewName)}:</b> ${escapeHtml(m.preview || '(ไม่มีข้อความ)')}</div>
+                    <div class="cab_full" hidden title="แตะเพื่อย่อ"></div>
                     <div class="cab_sub">${fmtBytes(m.size)} (ไม่บีบอัด ${fmtBytes(m.rawSize)})</div>
                 </div>
                 <div class="cab_actions">
@@ -576,7 +840,8 @@ async function renderBrowser() {
                     <div class="menu_button cab_dl" title="ดาวน์โหลด .jsonl"><i class="fa-solid fa-download"></i></div>
                     <div class="menu_button cab_del" title="ลบ snapshot นี้"><i class="fa-solid fa-trash"></i></div>
                 </div>
-            </div>`).join('');
+            </div>`;
+        }).join('');
     }
 
     list.querySelectorAll('.cab_row').forEach(row => {
@@ -589,6 +854,21 @@ async function renderBrowser() {
             await restoreAsNewChat(meta);
         }));
         row.querySelector('.cab_dl').addEventListener('click', guard(() => downloadSnapshot(meta)));
+        const pv = row.querySelector('.cab_preview');
+        const full = row.querySelector('.cab_full');
+        pv.addEventListener('click', guard(async () => {
+            if (!full.dataset.loaded) {
+                const t = String(await snapshotText(meta.id)).trimEnd();
+                const last = JSON.parse(t.slice(t.lastIndexOf('\n') + 1));
+                const name = document.createElement('b');
+                name.textContent = `${last?.name ?? ''}:`;
+                full.replaceChildren(name, document.createTextNode(' ' + (cleanText(last?.mes, { keepLines: true }) || '(ไม่มีข้อความ)')));
+                full.dataset.loaded = '1';
+            }
+            pv.hidden = true;
+            full.hidden = false;
+        }));
+        full.addEventListener('click', () => { full.hidden = true; pv.hidden = false; });
         row.querySelector('.cab_del').addEventListener('click', guard(async () => {
             if (!confirm('ลบ snapshot นี้?')) return;
             await dbDelete([meta.id]);
@@ -809,6 +1089,7 @@ function renderSettings() {
                 </div>
                 <label class="checkbox_label" title="snapshot ที่มีข้อความมากที่สุดจะไม่ถูกลบ แม้จะเก่ากว่าจำนวนที่ตั้งไว้"><input type="checkbox" id="cab_keeppeak"> เก็บ snapshot ที่ยาวที่สุดไว้เสมอ</label>
                 <label class="checkbox_label"><input type="checkbox" id="cab_shrinkwarn"> เตือนเมื่อแชทที่โหลดมาสั้นกว่า backup</label>
+                <label class="checkbox_label" title="ถ้าเปลี่ยนแค่ swipe ของข้อความสุดท้าย (ปัด/สร้าง swipe ใหม่) จะแทนที่ snapshot ล่าสุดแทนการเพิ่มใหม่ — ไม่เสียข้อมูล เพราะ snapshot ใหม่มีทุก swipe อยู่แล้ว"><input type="checkbox" id="cab_mergeswipes"> รวม snapshot ที่ต่างกันแค่ swipe ของข้อความสุดท้าย</label>
                 <label class="checkbox_label"><input type="checkbox" id="cab_notify"> แจ้งเตือนทุกครั้งที่ backup</label>
                 <hr class="sysHR">
                 <label class="checkbox_label" title="OK! / Waiting... / Attention! ตามด้วยเลขข้อความสุดท้ายที่ backup แล้ว — คลิกปุ่มเพื่อเปิดรายการ backup"><input type="checkbox" id="cab_indicator_on"> แสดงปุ่มสถานะบนหน้าแชท</label>
@@ -855,6 +1136,7 @@ function renderSettings() {
     bindCheck('cab_keeppeak', 'keepPeak');
     bindCheck('cab_shrinkwarn', 'shrinkWarn');
     bindCheck('cab_notify', 'notifyOnSave');
+    bindCheck('cab_mergeswipes', 'mergeSwipes');
     bindCheck('cab_indicator_on', 'showIndicator', updateIndicator);
     bindNum('cab_debounce', 'debounceSec');
     bindNum('cab_interval', 'intervalMin', startTimer);
@@ -973,6 +1255,6 @@ async function init() {
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl };
 
 if (typeof jQuery === 'function') jQuery(init); else init();
