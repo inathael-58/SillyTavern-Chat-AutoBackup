@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '1.5.1'; // keep in sync with manifest.json
+const VERSION = '1.7.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -35,7 +35,7 @@ const DEFAULTS = Object.freeze({
     // snapped to (null = free, e.g. after "reset to centre").
     indicatorPos: Object.freeze({ x: 1, y: 0.08, edge: 'right' }),
     // Off-device copy of each chat's newest snapshot in the user's own Dropbox (App folder).
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2 }),
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full' }), // 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -545,7 +545,7 @@ async function store(snap, { force = false, reason = 'auto' } = {}) {
         try { if (await onlyLastSwipesGrew(newest, snap)) mergeInto = newest; } catch (e) { console.warn(LOG, e); }
     }
 
-    const peak = existing.reduce((m, x) => Math.max(m, x.count), 0);
+    const peak = existing.filter(x => !x.acked).reduce((m, x) => Math.max(m, x.count), 0);
     const shrunk = peak >= 6 && snap.count < peak * 0.6;
 
     const packed = await pack(snap.jsonl);
@@ -623,15 +623,15 @@ async function checkLoadedChat() {
     if (!info) return;
     const c = ctx();
     const count = Array.isArray(c.chat) ? c.chat.length : 0;
-    const list = await dbMetaByKey(info.key);
+    const list = (await dbMetaByKey(info.key)).filter(m => !m.acked);
     if (!list.length) return;
     const peak = list.reduce((a, b) => (b.count > a.count ? b : a));
 
     if (s.shrinkWarn && peak.count >= 6 && count < peak.count * 0.6) {
         toast.warn(
-            `แชทนี้โหลดมาได้ ${count} ข้อความ แต่ backup มี ${peak.count} ข้อความ (${fmtTime(peak.ts)})<br>คลิกเพื่อเปิดรายการ backup`,
+            `แชทนี้โหลดมาได้ ${count} ข้อความ แต่ backup มี ${peak.count} ข้อความ (${fmtTime(peak.ts)})<br>แตะเพื่อดูว่าควรทำอะไรต่อ`,
             '⚠ แชทอาจหาย/ไม่ครบ',
-            { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false, onclick: () => openBrowser(info.key) },
+            { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false, onclick: () => showAttention() },
         );
     }
 }
@@ -725,24 +725,14 @@ async function importFile(file) {
 
 let browserKey = null; // null = all chats
 
-async function openBrowser(key) {
-    await flush();
-    browserKey = key === undefined ? (currentChatInfo()?.key ?? null) : key;
+/** Open the one modal (replacing any other) sized to the visible viewport. Returns { wrap, close }. */
+function openModal(innerHtml) {
     const old = document.getElementById('cab_modal');
     if (old) (old._cabClose ?? (() => old.remove()))();
 
     const wrap = document.createElement('div');
     wrap.id = 'cab_modal';
-    wrap.innerHTML = `
-        <div class="cab_dialog">
-            <div class="cab_head">
-                <b>Chat Backups</b>
-                <select id="cab_scope" class="text_pole"></select>
-                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
-            </div>
-            <div id="cab_list" class="cab_list"><i>กำลังโหลด…</i></div>
-            <div class="cab_foot" id="cab_foot"></div>
-        </div>`;
+    wrap.innerHTML = innerHtml;
     document.body.appendChild(wrap);
 
     // Match the *visible* viewport (mobile address bar / keyboard shrink it),
@@ -770,7 +760,23 @@ async function openBrowser(key) {
 
     wrap._cabClose = close;
     wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
-    wrap.querySelector('.cab_close').addEventListener('click', close);
+    wrap.querySelector('.cab_close')?.addEventListener('click', close);
+    return { wrap, close };
+}
+
+async function openBrowser(key) {
+    await flush();
+    browserKey = key === undefined ? (currentChatInfo()?.key ?? null) : key;
+    const { wrap } = openModal(`
+        <div class="cab_dialog">
+            <div class="cab_head">
+                <b>Chat Backups</b>
+                <select id="cab_scope" class="text_pole"></select>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div id="cab_list" class="cab_list"><i>กำลังโหลด…</i></div>
+            <div class="cab_foot" id="cab_foot"></div>
+        </div>`);
     wrap.querySelector('#cab_scope').addEventListener('change', e => {
         browserKey = e.target.value || null;
         renderBrowser();
@@ -842,6 +848,7 @@ async function renderBrowser() {
                         ${m.swipe ? `<span class="cab_tag" title="ข้อความล่าสุดมี ${m.swipe[1]} swipe ขณะนั้นเลือกอันที่ ${m.swipe[0]} — กู้คืนแล้วได้ครบทุก swipe">swipe ${m.swipe[0]}/${m.swipe[1]}</span>` : ''}
                         ${peakIdByKey.get(m.key) === m.id ? '<span class="cab_tag cab_peak" title="snapshot ที่มีข้อความมากที่สุดของแชทนี้ — ไม่ถูกลบอัตโนมัติ">สูงสุด</span>' : ''}
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
+                        ${m.cloud && m.source !== 'dropbox' ? `<span class="cab_tag cab_db_tag" title="ส่งขึ้น Dropbox แล้วเมื่อ ${fmtTime(m.cloud)}">Dropbox</span>` : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
                         ${m.reason === 'import' ? `<span class="cab_tag">${m.source === 'pocky' ? 'จาก Pocky' : m.source === 'dropbox' ? 'จาก Dropbox' : 'import'}</span>` : ''}
                         ${m.note ? `<span class="cab_tag cab_note_tag" title="จุดคืนค่าที่ตั้งชื่อไว้ใน Pocky — ไม่ถูกลบอัตโนมัติ">${escapeHtml(m.note)}</span>` : ''}
@@ -921,7 +928,7 @@ function ensureIndicator() {
     el.setAttribute('role', 'button');
     el.tabIndex = 0;
     el.hidden = true;
-    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBrowser(); } });
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onIndicatorTap(el); } });
     makeDraggable(el);
     // Fixed to the screen (not the chat column) so it can be parked anywhere.
     document.body.appendChild(el);
@@ -994,7 +1001,7 @@ function makeDraggable(el) {
         try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
         start = null;
         if (!dragged) {
-            if (e.type === 'pointerup') openBrowser();
+            if (e.type === 'pointerup') onIndicatorTap(el);
             return;
         }
         el.classList.remove('cab_dragging');
@@ -1055,7 +1062,7 @@ async function updateIndicator() {
     if (seq !== indicatorSeq) return; // a newer update already ran
 
     const newest = list[0];
-    const peak = list.reduce((a, b) => (!a || b.count > a.count ? b : a), null);
+    const peak = list.filter(m => !m.acked).reduce((a, b) => (!a || b.count > a.count ? b : a), null);
     const busy = (pending && pending.info.key === info.key) || inflightByKey.has(info.key);
     const lastId = m => (m ? `#${m.count - 1}` : '#–');
 
@@ -1077,10 +1084,213 @@ async function updateIndicator() {
     }
 
     el.dataset.state = state;
-    el.textContent = `${label} ${num}`;
-    el.title = `${tip}\nคลิกเพื่อดู/กู้คืน · ลากเพื่อย้ายตำแหน่ง`;
+    const parts = [document.createTextNode(`${label} ${num}`)];
+    const db = dropboxStateFor(info.key, list);
+    const dbStyle = dbxSettings().indicatorStyle;
+    if (db && dbStyle !== 'off') {
+        const span = document.createElement('span');
+        span.className = 'cab_db';
+        span.dataset.db = db.state;
+        span.textContent = dbStyle === 'short' ? ` ${db.short}` : ` · ${db.text}`;
+        parts.push(span);
+        tip += `\n${db.tip}`;
+    }
+    const needsHelp = state === 'attention' || db?.state === 'held';
+    el.dataset.help = needsHelp ? '1' : '';
+    if (needsHelp) tip += '\nแตะเพื่อดูว่าเกิดอะไรขึ้น และทำอะไรต่อได้บ้าง';
+    el.replaceChildren(...parts);
+    el.title = `${tip}\n${needsHelp ? '' : 'คลิกเพื่อดู/กู้คืน · '}ลากเพื่อย้ายตำแหน่ง`;
     el.hidden = false;
     placeIndicator(el); // text width may have changed
+}
+
+/**
+ * What Dropbox holds for this chat, for the status button.
+ *   DB #20      Dropbox has the newest backup (messages #0–#20)
+ *   DB #18...   a newer backup is waiting to be sent; Dropbox has up to #18
+ *   DB! #18     not sent: looked truncated, or the last attempt failed
+ * Short style shows only ✓ / … / ✗.
+ */
+function dropboxStateFor(key, list) {
+    if (!dbxConnected()) return null;
+    const newest = list[0];
+    const fromMeta = list.find(m => m.cloud);
+    const stored = cloudRecord(key);
+    const up = [fromMeta && { ts: fromMeta.cloud, count: fromMeta.count }, stored]
+        .filter(Boolean).sort((a, b) => b.ts - a.ts)[0];
+    const num = up ? `#${up.count - 1}` : '#–';
+    const when = up ? `ส่งถึงข้อความ ${num} เมื่อ ${fmtTime(up.ts)}` : 'ยังไม่เคยส่งแชทนี้';
+    const held = cloud.withheld.find(w => w.key === key);
+    if (held) return { state: 'held', short: '✗', text: `DB! ${num}`, tip: `Dropbox: ไม่ได้ส่งเวอร์ชันล่าสุด — ${held.why} (กด "ส่งตอนนี้" ในแผงตั้งค่าถ้าตั้งใจ) · ${when}` };
+    if (cloud.error && newest && !newest.cloud) return { state: 'held', short: '✗', text: `DB! ${num}`, tip: `Dropbox: ส่งไม่สำเร็จ — ${cloud.error} (จะลองใหม่เอง) · ${when}` };
+    if (newest && !newest.cloud) {
+        const why = dbxSettings().auto === false ? 'ปิดการส่งอัตโนมัติอยู่' : 'รอส่ง';
+        return { state: 'behind', short: '…', text: `DB ${num}...`, tip: `Dropbox: ${why} — ${when}` };
+    }
+    return { state: 'ok', short: '✓', text: `DB ${num}`, tip: `Dropbox: ${when}` };
+}
+
+// Last known Dropbox copy per chat. Kept outside the snapshot list because the
+// uploaded snapshot itself may later be merged or pruned away.
+function cloudRecords() {
+    try { return JSON.parse(localStorage.getItem('cab_cloud_state') || '{}') || {}; } catch { return {}; }
+}
+function cloudRecord(key) { return cloudRecords()[key] || null; }
+function setCloudRecord(key, rec) {
+    try {
+        const all = cloudRecords();
+        if (all[key] && all[key].ts > rec.ts) return;
+        all[key] = rec;
+        localStorage.setItem('cab_cloud_state', JSON.stringify(all));
+    } catch { /* storage unavailable: meta.cloud still covers the common case */ }
+}
+
+// ---------------------------------------------------------------- "what happened?" dialog
+
+function onIndicatorTap(el) {
+    if (el.dataset.help) showAttention(); else openBrowser();
+}
+
+/** Mark every snapshot of this chat as "not the reference any more" (user trimmed the chat on purpose). */
+async function ackShrink(key) {
+    const list = await dbMetaByKey(key);
+    const d = await db();
+    const tx = d.transaction(META, 'readwrite');
+    for (const m of list) if (!m.acked) tx.objectStore(META).put({ ...m, acked: true });
+    await txDone(tx);
+    lastError = lastError?.key === key ? null : lastError;
+}
+
+/**
+ * Explain what is wrong with the open chat's backup, and offer the ways forward.
+ * Problems are listed most urgent first; each carries its own buttons.
+ */
+async function showAttention() {
+    await flush();
+    const info = currentChatInfo();
+    if (!info) return openBrowser();
+    const c = ctx();
+    const count = Array.isArray(c.chat) ? c.chat.length : 0;
+    const list = await dbMetaByKey(info.key);
+    const newest = list[0];
+    const peak = list.filter(m => !m.acked).reduce((a, b) => (!a || b.count > a.count ? b : a), null);
+    const held = cloud.withheld.find(w => w.key === info.key);
+    const cloudErr = dbxConnected() && cloud.error && newest && !newest.cloud ? cloud.error : '';
+
+    const problems = [];
+    if (lastError && lastError.key === info.key) {
+        problems.push({
+            title: 'บันทึก backup ลงเครื่องไม่สำเร็จ',
+            body: `<p>ข้อความจาก browser: <code>${escapeHtml(lastError.message)}</code></p>
+                <p>มักเกิดจากพื้นที่ในเครื่องเต็ม หรือ browser ไม่อนุญาตให้เก็บข้อมูล (เช่น โหมดส่วนตัว) แชทบนเซิร์ฟเวอร์ไม่ได้รับผลกระทบ แต่ช่วงนี้ไม่มีสำเนาใหม่ในเครื่อง</p>`,
+            actions: [
+                { label: 'ลองบันทึกอีกครั้ง', primary: true, run: async () => { await backupNow(); } },
+                { label: 'Export backup ทั้งหมดเก็บไว้', run: () => exportAll() },
+            ],
+        });
+    }
+    if (peak && peak.count >= 6 && count < peak.count * 0.6) {
+        const canRestore = peak.type === 'character';
+        problems.push({
+            title: `แชทบนจอสั้นกว่า backup (${count} จาก ${peak.count} ข้อความ)`,
+            body: `<p>แชทนี้เคยมีถึงข้อความ #${peak.count - 1} (backup เมื่อ ${fmtTime(peak.ts)}) แต่ตอนนี้โหลดมาได้แค่ ${count} ข้อความ</p>
+                <p><b>ถ้าไม่ได้ลบเอง</b> — เซิร์ฟเวอร์น่าจะส่งแชทมาไม่ครบ หรือไฟล์แชทเสีย ลองโหลดใหม่ก่อน ถ้ายังสั้นอยู่ให้กู้คืนจาก backup (จะได้เป็นไฟล์แชทใหม่ ไฟล์เดิมไม่ถูกแตะ)</p>
+                <p><b>ถ้าลบข้อความเองโดยตั้งใจ</b> — กด "ตั้งใจลบเอง" แล้วแชทนี้จะเป็นฉบับหลักต่อจากนี้ backup เดิมยังอยู่ในรายการเผื่อเปลี่ยนใจ</p>`,
+            actions: [
+                { label: 'โหลดแชทใหม่จากเซิร์ฟเวอร์', run: async () => {
+                    if (typeof c.reloadCurrentChat !== 'function') throw new Error('ST รุ่นนี้ไม่มีคำสั่งโหลดแชทใหม่ — ลองเปิดแชทอื่นแล้วกลับมา');
+                    await c.reloadCurrentChat();
+                    await new Promise(r => setTimeout(r, 500));
+                    const now = Array.isArray(ctx().chat) ? ctx().chat.length : 0;
+                    (now >= peak.count * 0.6 ? toast.ok : toast.warn)(`โหลดใหม่แล้ว ได้ ${now} ข้อความ`, 'Chat Backup');
+                } },
+                canRestore && { label: `กู้คืนฉบับ ${peak.count} ข้อความ`, primary: true, run: async () => {
+                    if (!confirm(`กู้คืน backup ${fmtTime(peak.ts)} (${peak.count} ข้อความ) เป็นไฟล์แชทใหม่?\nไฟล์แชทปัจจุบันจะไม่ถูกแก้ไข`)) return false;
+                    await restoreAsNewChat(peak);
+                } },
+                { label: 'เลือก backup เอง', run: () => { openBrowser(info.key); return 'keep'; } },
+                { label: 'ตั้งใจลบเอง', run: async () => {
+                    if (!confirm(`ยืนยันว่าลบข้อความเองโดยตั้งใจ?\nแชท ${count} ข้อความนี้จะเป็นฉบับหลัก${dbxConnected() ? ' และจะส่งทับไฟล์บน Dropbox' : ''} — backup เดิมยังอยู่ในรายการ`)) return false;
+                    await ackShrink(info.key);
+                    if (dbxConnected()) await cloudTick({ ignoreGap: true, force: true, forceKeys: [info.key] });
+                    toast.ok('ตั้งแชทนี้เป็นฉบับหลักแล้ว', 'Chat Backup');
+                } },
+            ],
+        });
+    } else if (held) {
+        problems.push({
+            title: 'ยังไม่ได้ส่งแชทนี้ขึ้น Dropbox',
+            body: `<p>เหตุผล: ${escapeHtml(held.why)}</p>
+                <p>ไฟล์บน Dropbox มีข้อความมากกว่าที่อยู่ในเครื่อง ระบบจึงไม่ส่งทับ กันแชทที่โหลดมาไม่ครบไปลบของดี</p>
+                <p><b>ถ้าแชทในเครื่องหายไปบางส่วน</b> — ดึงฉบับจาก Dropbox มาแล้วกู้คืน<br><b>ถ้าลบข้อความเองโดยตั้งใจ</b> — ส่งทับได้เลย (Dropbox เก็บเวอร์ชันเก่าไว้ให้อีกประมาณ 30 วัน)</p>`,
+            actions: [
+                { label: 'ดึงฉบับจาก Dropbox', primary: true, run: async () => {
+                    const r = await cloudPull(null, { onlyKey: info.key });
+                    toast.ok(r.added ? 'ได้ฉบับจาก Dropbox แล้ว — เลือกกู้คืนจากรายการ' : 'ฉบับบน Dropbox มีอยู่ในรายการแล้ว', 'Dropbox');
+                    openBrowser(info.key);
+                    return 'keep';
+                } },
+                { label: 'ส่งทับ Dropbox', run: async () => {
+                    if (!confirm('ส่งแชทในเครื่องทับไฟล์บน Dropbox?')) return false;
+                    await ackShrink(info.key);
+                    await cloudTick({ ignoreGap: true, force: true, forceKeys: [info.key] });
+                    if (cloud.error) throw new Error(cloud.error);
+                    toast.ok('ส่งทับแล้ว', 'Dropbox');
+                } },
+            ],
+        });
+    }
+    if (cloudErr) {
+        const needsReconnect = !dbxConnected() || /เชื่อมต่อใหม่/.test(cloudErr);
+        problems.push({
+            title: 'ส่งขึ้น Dropbox ไม่สำเร็จ',
+            body: `<p>ข้อความจาก Dropbox: <code>${escapeHtml(cloudErr)}</code></p>
+                <p>${needsReconnect ? 'สิทธิ์ที่ให้ไว้ใช้ไม่ได้แล้ว ต้องเชื่อมต่อใหม่ในแผงตั้งค่า Extensions → Chat Auto Backup' : 'ส่วนใหญ่เป็นเพราะเน็ตหลุดชั่วคราว ระบบจะลองใหม่เองทุกครึ่งนาที backup ในเครื่องยังปกติ'}</p>`,
+            actions: needsReconnect ? [] : [
+                { label: 'ลองส่งอีกครั้ง', primary: true, run: async () => {
+                    cloud.backoffUntil = 0;
+                    await cloudTick({ ignoreGap: true });
+                    if (cloud.error) throw new Error(cloud.error);
+                    toast.ok('ส่งแล้ว', 'Dropbox');
+                } },
+            ],
+        });
+    }
+    if (!problems.length) return openBrowser(info.key);
+
+    const { wrap, close } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>${escapeHtml(info.label)} — เกิดอะไรขึ้น</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list">${problems.map((p, i) => `
+                <section class="cab_problem">
+                    <h4>${escapeHtml(p.title)}</h4>
+                    ${p.body}
+                    <div class="cab_buttons">${p.actions.filter(Boolean).map((a, j) =>
+                        `<div class="menu_button${a.primary ? ' cab_primary' : ''}" data-p="${i}" data-a="${j}">${escapeHtml(a.label)}</div>`).join('')}</div>
+                </section>`).join('')}
+            </div>
+            <div class="cab_foot"><span class="cab_linkish" data-browse>ดูรายการ backup ทั้งหมดของแชทนี้</span></div>
+        </div>`);
+    wrap.querySelector('[data-browse]').addEventListener('click', () => openBrowser(info.key));
+    let busy = false;
+    wrap.querySelectorAll('.cab_problem .menu_button').forEach(btn => {
+        const action = problems[btn.dataset.p].actions.filter(Boolean)[btn.dataset.a];
+        btn.addEventListener('click', async () => {
+            if (busy) return;
+            busy = true;
+            btn.classList.add('disabled');
+            let result;
+            try { result = await action.run(); } catch (e) { console.error(LOG, e); toast.err(String(e?.message ?? e)); result = false; }
+            busy = false;
+            btn.classList.remove('disabled');
+            if (result === false || result === 'keep') return;
+            if (document.getElementById('cab_modal') === wrap) close();
+            updateIndicator();
+        });
+    });
 }
 
 // ---------------------------------------------------------------- settings panel
@@ -1141,6 +1351,14 @@ function renderSettings() {
                 </div>
                 <div id="cab_dbx_on" hidden>
                     <label class="checkbox_label" title="ส่ง snapshot ล่าสุดของแชทที่เปลี่ยน ขึ้น Dropbox ทีละแชท ทับไฟล์เดิมของแชทนั้น"><input type="checkbox" id="cab_dbx_auto"> ส่งขึ้น Dropbox อัตโนมัติ</label>
+                    <div class="cab_grid">
+                        <label for="cab_dbx_style">สถานะ Dropbox บนปุ่ม</label>
+                        <select id="cab_dbx_style" class="text_pole">
+                            <option value="full">แบบเต็ม · DB #20</option>
+                            <option value="short">แบบย่อ ✓ … ✗</option>
+                            <option value="off">ไม่แสดง</option>
+                        </select>
+                    </div>
                     <div class="cab_grid">
                         <label for="cab_dbx_interval">ส่งแต่ละแชทไม่ถี่กว่าทุก (นาที)</label>
                         <input type="number" id="cab_dbx_interval" class="text_pole" min="1" max="120" step="1">
@@ -1508,7 +1726,9 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } 
             await dbxUpload(path, blob, m.ts);
             m.cloud = Date.now();
             await dbMarkCloud(m.id, m.cloud);
+            setCloudRecord(m.key, { ts: m.cloud, count: m.count });
             cloud.lastAt.set(m.key, m.cloud);
+            updateIndicator();
             cloud.lastOk = m.cloud;
             cloud.pending--;
             renderDbxStatus();
@@ -1521,6 +1741,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } 
     } finally {
         cloud.running = false;
         renderDbxStatus();
+        updateIndicator();
         if (cloud.again) { const a = cloud.again; cloud.again = null; setTimeout(() => cloudTick(a), 1000); }
     }
 }
@@ -1533,13 +1754,21 @@ function cloudSoon() {
 }
 
 /** Download every chat file from Dropbox into local snapshots. */
-async function cloudPull(progress) {
+async function cloudPull(progress, { onlyKey = null } = {}) {
     const files = [];
-    let page = await dbxRpc('files/list_folder', { path: '', recursive: true, limit: 2000 });
-    for (;;) {
-        for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl$/i.test(e.name)) files.push(e);
-        if (!page.has_more) break;
-        page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
+    if (onlyKey) {
+        const m = (await dbMetaByKey(onlyKey))[0];
+        const path = m && dbxPathOf(m);
+        const meta = path && await dbxMetadata(path);
+        if (!meta) throw new Error('ไม่พบไฟล์ของแชทนี้บน Dropbox');
+        files.push({ ...meta, path_display: meta.path_display || path, path_lower: meta.path_lower || path });
+    } else {
+        let page = await dbxRpc('files/list_folder', { path: '', recursive: true, limit: 2000 });
+        for (;;) {
+            for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl$/i.test(e.name)) files.push(e);
+            if (!page.has_more) break;
+            page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
+        }
     }
     const all = await dbAllMeta();
     for (const m of all) if ((m.sv || 0) < SNAP_VERSION) { try { await upgradeSnapshot(m); } catch { /* ignore */ } }
@@ -1557,6 +1786,7 @@ async function cloudPull(progress) {
         const key = `${isGroup ? 'g' : 'c'}:${entity}:${chatId}`;
         let text, d;
         try { text = await dbxDownloadText(f.path_lower); d = deriveFromJsonl(text); } catch (e) { console.warn(LOG, e); skipped++; continue; }
+        if (d.count) setCloudRecord(key, { ts: Date.parse(f.server_modified) || Date.now(), count: d.count });
         if (!d.count || seen.has(`${key}|${d.hash}`)) { skipped++; continue; }
         let label = entity;
         if (isGroup) label = (c.groups || []).find(g => String(g.id) === entity)?.name ?? `Group ${entity}`;
@@ -1579,6 +1809,7 @@ async function cloudPull(progress) {
         added++;
         text = null;
     }
+    updateIndicator();
     return { added, skipped, total: files.length };
 }
 
@@ -1619,6 +1850,11 @@ function wireDbxPanel() {
     const d = dbxSettings();
     $('cab_dbx_key').value = d.appKey;
     $('cab_dbx_auto').checked = d.auto !== false;
+    if (d.onIndicator === false && d.indicatorStyle === 'full') d.indicatorStyle = 'off'; // from v1.6
+    delete d.onIndicator;
+    if (!['full', 'short', 'off'].includes(d.indicatorStyle)) d.indicatorStyle = 'full';
+    $('cab_dbx_style').value = d.indicatorStyle;
+    $('cab_dbx_style').addEventListener('change', e => { d.indicatorStyle = e.target.value; saveSettings(); updateIndicator(); });
     $('cab_dbx_interval').value = d.intervalMin;
 
     let busy = false;
@@ -1670,11 +1906,12 @@ function wireDbxPanel() {
         cloud.tokenExp = Date.now() + (Number(j.expires_in) || 14_400) * 1000;
         saveSettings();
         toast.ok('เชื่อมต่อแล้ว กำลังส่ง backup ขึ้นไป', 'Dropbox');
+        updateIndicator();
         renderDbxPanel();
         cloudTick({ ignoreGap: true });
     }));
 
-    $('cab_dbx_auto').addEventListener('change', e => { d.auto = e.target.checked; saveSettings(); renderDbxStatus(); if (d.auto) cloudTick(); });
+    $('cab_dbx_auto').addEventListener('change', e => { d.auto = e.target.checked; saveSettings(); renderDbxStatus(); updateIndicator(); if (d.auto) cloudTick(); });
     $('cab_dbx_interval').addEventListener('change', e => {
         const v = Math.round(Number(e.target.value));
         d.intervalMin = Number.isFinite(v) && v >= 1 && v <= 120 ? v : DEFAULTS.dropbox.intervalMin;
@@ -1713,6 +1950,7 @@ function wireDbxPanel() {
         d.pendingVerifier = '';
         cloud.token = '';
         saveSettings();
+        updateIndicator();
     }));
 
     renderDbxPanel();
@@ -1947,6 +2185,6 @@ async function init() {
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, checkForNewVersion, reloadWithFreshFiles, VERSION };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION };
 
 if (typeof jQuery === 'function') jQuery(init); else init();

@@ -186,3 +186,20 @@
 .cab_settings .menu_button.disabled { opacity: 0.5; pointer-events: none; }
 .cab_settings .cab_note a { text-decoration: underline; }
 .cab_settings .cab_version { opacity: 0.6; font-weight: normal; }
+
+/* ---------------------------------------------------------------- v1.6: Dropbox state on the status button */
+#cab_indicator .cab_db[data-db="behind"] { opacity: 0.65; }
+#cab_indicator .cab_db[data-db="held"] { font-weight: 700; }
+#cab_modal .cab_db_tag { opacity: 0.8; }
+
+/* ---------------------------------------------------------------- v1.7: "what happened?" dialog */
+#cab_modal .cab_explain .cab_list { padding: 8px 14px; }
+#cab_modal .cab_problem + .cab_problem { border-top: 1px solid var(--SmartThemeBorderColor, #555); margin-top: 10px; padding-top: 10px; }
+#cab_modal .cab_problem h4 { margin: 4px 0 6px; color: var(--SmartThemeQuoteColor, #e18a24); }
+#cab_modal .cab_problem p { margin: 0 0 8px; line-height: 1.45; }
+#cab_modal .cab_problem code { overflow-wrap: anywhere; }
+#cab_modal .cab_problem .cab_buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+#cab_modal .cab_problem .menu_button { width: auto; margin: 0; padding: 6px 12px; }
+#cab_modal .cab_problem .cab_primary { border-color: var(--SmartThemeQuoteColor, #e18a24); font-weight: 700; }
+#cab_modal .menu_button.disabled { opacity: 0.5; pointer-events: none; }
+#cab_modal .cab_linkish { cursor: pointer; text-decoration: underline; }
