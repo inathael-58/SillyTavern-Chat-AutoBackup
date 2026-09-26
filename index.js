@@ -16,6 +16,8 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
+const VERSION = '1.5.1'; // keep in sync with manifest.json
+const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
     enabled: true,
@@ -116,7 +118,7 @@ function downloadBlob(blob, name) {
 
 const toast = {
     ok: (m, t) => globalThis.toastr?.success(m, t ?? 'Chat Backup'),
-    info: (m, t) => globalThis.toastr?.info(m, t ?? 'Chat Backup'),
+    info: (m, t, o) => globalThis.toastr?.info(m, t ?? 'Chat Backup', o),
     warn: (m, t, o) => globalThis.toastr?.warning(m, t ?? 'Chat Backup', o),
     err: (m, t) => globalThis.toastr?.error(m, t ?? 'Chat Backup'),
 };
@@ -1089,7 +1091,7 @@ function renderSettings() {
     <div id="cab_settings" class="cab_settings">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Chat Auto Backup</b>
+                <b>Chat Auto Backup <small class="cab_version">v${VERSION}</small></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
@@ -1289,10 +1291,50 @@ function wireEvents() {
     // write that's already in-flight usually completes.
     window.addEventListener('pagehide', () => flush());
     document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') checkForNewVersion();
         if (document.visibilityState !== 'hidden') return;
         // Leaving the app: write what's pending, then push it off the device if we can.
         flush().then(() => cloudTick({ ignoreGap: true })).catch(() => { /* next tick */ });
     });
+}
+
+// ---------------------------------------------------------------- stale-code check
+//
+// SillyTavern loads extension files by a fixed URL, and a home-screen web app
+// on iOS rarely does a real reload, so after "Update" the old code can keep
+// running for a long time. Compare with the manifest on the server; if it is
+// newer, refresh the cached files explicitly and reload.
+
+let versionCheckedAt = 0;
+let versionToastShown = false;
+
+async function checkForNewVersion() {
+    if (versionToastShown || Date.now() - versionCheckedAt < 10 * 60_000) return;
+    versionCheckedAt = Date.now();
+    let remote;
+    try {
+        const res = await fetch(new URL('manifest.json', BASE_URL), { cache: 'no-store' });
+        if (!res.ok) return;
+        remote = String((await res.json())?.version ?? '');
+    } catch { return; }
+    if (!remote || remote === VERSION) return;
+    versionToastShown = true;
+    toast.info(`ติดตั้ง v${remote} ไว้แล้ว แต่หน้านี้ยังรัน v${VERSION} อยู่<br>แตะที่นี่เพื่อโหลดเวอร์ชันใหม่`, 'Chat Auto Backup', {
+        timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false,
+        onclick: () => reloadWithFreshFiles(),
+    });
+}
+
+async function reloadWithFreshFiles() {
+    try {
+        await flush();
+        // cache: 'reload' fetches from the server and overwrites the browser's cached copy,
+        // so the page reload below picks up the new files.
+        await Promise.all(['index.js', 'style.css', 'manifest.json'].map(f =>
+            fetch(new URL(f, BASE_URL), { cache: 'reload' }).catch(() => null)));
+    } finally {
+        location.reload();
+    }
 }
 
 // ---------------------------------------------------------------- Dropbox sync
@@ -1898,12 +1940,13 @@ async function init() {
     try { await db(); } catch (e) { toast.err('เปิด IndexedDB ไม่ได้: ' + (e?.message ?? e)); }
     updateIndicator();
     wireDbxPanel();
+    setTimeout(checkForNewVersion, 3000);
     wirePockyPanel();
     refreshPockyPanel().catch(e => console.warn(LOG, e));
     console.log(LOG, 'loaded');
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, checkForNewVersion, reloadWithFreshFiles, VERSION };
 
 if (typeof jQuery === 'function') jQuery(init); else init();

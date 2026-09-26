@@ -185,3 +185,4 @@
 #cab_dbx_setup .text_pole, #cab_dbx_step2 .text_pole { width: 100%; box-sizing: border-box; margin: 4px 0; }
 .cab_settings .menu_button.disabled { opacity: 0.5; pointer-events: none; }
 .cab_settings .cab_note a { text-decoration: underline; }
+.cab_settings .cab_version { opacity: 0.6; font-weight: normal; }
