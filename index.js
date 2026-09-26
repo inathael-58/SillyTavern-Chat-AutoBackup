@@ -588,7 +588,8 @@ async function onlyLastSwipesGrew(prevMeta, snap) {
 
 async function prune(key) {
     const s = settings();
-    const list = await dbMetaByKey(key); // newest first
+    // Named checkpoints imported from Pocky are kept until deleted by hand.
+    const list = (await dbMetaByKey(key)).filter(x => !x.note); // newest first
     const max = Math.max(1, Number(s.maxPerChat) || DEFAULTS.maxPerChat);
     if (list.length <= max) return;
 
@@ -827,7 +828,8 @@ async function renderBrowser() {
                         ${peakIdByKey.get(m.key) === m.id ? '<span class="cab_tag cab_peak" title="snapshot ที่มีข้อความมากที่สุดของแชทนี้ — ไม่ถูกลบอัตโนมัติ">สูงสุด</span>' : ''}
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
-                        ${m.reason === 'import' ? '<span class="cab_tag">import</span>' : ''}
+                        ${m.reason === 'import' ? `<span class="cab_tag">${m.source === 'pocky' ? 'จาก Pocky' : 'import'}</span>` : ''}
+                        ${m.note ? `<span class="cab_tag cab_note_tag" title="จุดคืนค่าที่ตั้งชื่อไว้ใน Pocky — ไม่ถูกลบอัตโนมัติ">${escapeHtml(m.note)}</span>` : ''}
                     </div>
                     ${browserKey ? '' : `<div class="cab_sub">${escapeHtml(m.label)} — ${escapeHtml(m.chatId)}</div>`}
                     ${changes ? `<div class="cab_changes" title="เทียบกับ snapshot ก่อนหน้าของแชทนี้">${escapeHtml(changes)}${m.mergedSwipes ? ` <span class="cab_merged">(รวม swipe ไว้ ${m.mergedSwipes} ครั้ง)</span>` : ''}</div>` : ''}
@@ -1109,6 +1111,15 @@ function renderSettings() {
                     <input type="file" id="cab_import_file" accept=".json,application/json" hidden>
                 </div>
                 <small class="cab_note">เก็บในเบราว์เซอร์นี้เท่านั้น (IndexedDB) — เครื่อง/เบราว์เซอร์อื่นมี backup แยกกัน ควรกด Export เก็บไว้เป็นระยะ</small>
+                <div id="cab_pocky" hidden>
+                    <hr class="sysHR">
+                    <b>ข้อมูลที่ Pocky chat vault ทิ้งไว้</b>
+                    <small id="cab_pocky_info" class="cab_note"></small>
+                    <div class="cab_buttons">
+                        <div id="cab_pocky_import" class="menu_button" title="นำ backup ล่าสุดของแต่ละแชท และจุดคืนค่าที่ตั้งชื่อไว้ เข้ามาเป็น snapshot ของ Chat Auto Backup">นำเข้าอันที่สำคัญ</div>
+                        <div id="cab_pocky_delete" class="menu_button" title="ลบฐานข้อมูลของ Pocky ออกจากเบราว์เซอร์นี้ เพื่อคืนพื้นที่">ลบฐานข้อมูล Pocky</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>`;
@@ -1242,6 +1253,216 @@ function wireEvents() {
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 }
 
+// ---------------------------------------------------------------- leftovers from Pocky chat vault
+//
+// Pocky keeps every snapshot uncompressed in its own IndexedDB database, and
+// uninstalling the extension does not remove it. These helpers read it one
+// record at a time (never getAll — that is what made Safari run out of memory),
+// import what matters, and delete it.
+
+const POCKY_DB = 'sillytavern-chat-vault';
+const POCKY_LATEST = 'latest-backups';
+const POCKY_HISTORY = 'backup-history';
+
+/** true / false, or null when the browser can't list databases. */
+async function pockyDbExists() {
+    if (typeof indexedDB?.databases !== 'function') return null;
+    try { return (await indexedDB.databases()).some(d => d.name === POCKY_DB); } catch { return null; }
+}
+
+/** Open Pocky's database without creating it; resolves null when it doesn't exist. */
+function openPockyDb() {
+    return new Promise((resolve, reject) => {
+        let created = false;
+        const req = indexedDB.open(POCKY_DB);
+        req.onupgradeneeded = () => { created = true; };
+        req.onsuccess = () => {
+            const d = req.result;
+            d.onversionchange = () => d.close();
+            if (created) { d.close(); indexedDB.deleteDatabase(POCKY_DB); resolve(null); return; }
+            resolve(d);
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+function pockyStillInstalled() {
+    return !!document.querySelector('[id^="chat_vault_"], [class*="chat-vault-cat"]');
+}
+
+async function pockyStats(d) {
+    const names = [...d.objectStoreNames];
+    const count = async store => (names.includes(store) ? await reqP(d.transaction(store, 'readonly').objectStore(store).count()) : 0);
+    return { chats: await count(POCKY_LATEST), history: await count(POCKY_HISTORY) };
+}
+
+function pockyToSnapshot(r) {
+    const content = String(r?.content ?? '');
+    if (!content.trim() || !r?.chatId) return null;
+    const d = deriveFromJsonl(content);
+    if (!d.count) return null;
+    const isGroup = r.entityType === 'group';
+    const entity = String(r.entityId ?? '');
+    const chatId = String(r.chatId);
+    return {
+        d,
+        jsonl: content,
+        meta: {
+            key: `${isGroup ? 'g' : 'c'}:${entity}:${chatId}`,
+            type: isGroup ? 'group' : 'character',
+            chatId,
+            groupId: isGroup ? entity : null,
+            avatar: isGroup ? null : entity,
+            label: String(r.characterName || entity || chatId),
+            ts: Date.parse(r.savedAt) || Date.now(),
+            hash: d.hash,
+            count: d.count,
+            preview: d.preview,
+            previewName: d.previewName,
+            swipe: d.swipe,
+            rawSize: content.length,
+            reason: 'import',
+            source: 'pocky',
+            note: r.isCheckpoint && r.checkpointName ? String(r.checkpointName).slice(0, 80) : '',
+            shrunk: false,
+            mergedSwipes: 0,
+            sv: SNAP_VERSION,
+        },
+    };
+}
+
+/** Import each chat's newest Pocky backup plus its named checkpoints. */
+async function importFromPocky(progress) {
+    const pd = await openPockyDb();
+    if (!pd) return { added: 0, skipped: 0 };
+    try {
+        const names = [...pd.objectStoreNames];
+        const keys = [];
+        if (names.includes(POCKY_LATEST)) {
+            for (const k of await reqP(pd.transaction(POCKY_LATEST, 'readonly').objectStore(POCKY_LATEST).getAllKeys())) keys.push([POCKY_LATEST, k]);
+        }
+        if (names.includes(POCKY_HISTORY)) {
+            // Walk the history one record at a time and remember only the checkpoints' keys.
+            const store = pd.transaction(POCKY_HISTORY, 'readonly').objectStore(POCKY_HISTORY);
+            await new Promise((res, rej) => {
+                let n = 0;
+                const cur = store.openCursor();
+                cur.onsuccess = () => {
+                    const c = cur.result;
+                    if (!c) return res();
+                    if (c.value?.isCheckpoint) keys.push([POCKY_HISTORY, c.primaryKey]);
+                    if (++n % 50 === 0) progress?.(`กำลังค้นหาจุดคืนค่าที่ตั้งชื่อไว้… (${n})`);
+                    c.continue();
+                };
+                cur.onerror = () => rej(cur.error);
+            });
+        }
+
+        const all = await dbAllMeta();
+        for (const m of all) if ((m.sv || 0) < SNAP_VERSION) { try { await upgradeSnapshot(m); } catch { /* ignore */ } }
+        const seen = new Set(all.map(m => `${m.key}|${m.hash}`));
+        let added = 0, skipped = 0;
+        for (let i = 0; i < keys.length; i++) {
+            progress?.(`กำลังนำเข้า ${i + 1}/${keys.length}…`);
+            const [storeName, k] = keys[i];
+            let rec;
+            try { rec = await reqP(pd.transaction(storeName, 'readonly').objectStore(storeName).get(k)); } catch { skipped++; continue; }
+            let snap;
+            try { snap = pockyToSnapshot(rec); } catch { snap = null; }
+            rec = null;
+            if (!snap) { skipped++; continue; }
+            const id = `${snap.meta.key}|${snap.meta.hash}`;
+            if (seen.has(id)) {
+                // Same content already here; still keep a checkpoint's name.
+                if (snap.meta.note) {
+                    const same = all.find(m => `${m.key}|${m.hash}` === id);
+                    if (same && !same.note) { same.note = snap.meta.note; await dbPutMeta(same); }
+                }
+                skipped++;
+                continue;
+            }
+            const packed = await pack(snap.jsonl);
+            snap.meta.size = packed.enc === 'gzip' ? packed.data.size : snap.jsonl.length;
+            const newId = await dbAdd(snap.meta, packed, snap.d.sigs);
+            all.push({ ...snap.meta, id: newId });
+            seen.add(id);
+            added++;
+        }
+        return { added, skipped };
+    } finally {
+        pd.close();
+    }
+}
+
+function deletePockyDb() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(POCKY_DB);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => toast.warn('Pocky ยังเปิดฐานข้อมูลอยู่ในแท็บอื่น — ปิดหรือรีเฟรชแท็บนั้นแล้วการลบจะทำต่อเอง');
+    });
+}
+
+async function storageUsed() {
+    try { return (await navigator.storage?.estimate?.())?.usage ?? null; } catch { return null; }
+}
+
+async function refreshPockyPanel() {
+    const box = document.getElementById('cab_pocky');
+    const info = document.getElementById('cab_pocky_info');
+    if (!box || !info) return;
+    let exists = await pockyDbExists();
+    let stats = null;
+    if (exists !== false) {
+        try {
+            const pd = await openPockyDb();
+            if (pd) { stats = await pockyStats(pd); pd.close(); exists = true; } else exists = false;
+        } catch (e) { console.warn(LOG, e); }
+    }
+    box.hidden = !exists;
+    if (!exists) return;
+    const used = await storageUsed();
+    info.textContent = `พบฐานข้อมูลของ Pocky: ${stats?.chats ?? '?'} แชท, ประวัติ ${stats?.history ?? '?'} snapshot (ไม่บีบอัด)`
+        + (used != null ? ` · เว็บไซต์นี้ใช้พื้นที่เบราว์เซอร์รวม ${fmtBytes(used)}` : '')
+        + (pockyStillInstalled() ? ' · ⚠ Pocky ยังติดตั้งอยู่ ถอนการติดตั้งก่อน ไม่อย่างนั้นมันจะสร้างข้อมูลใหม่ขึ้นมาอีก' : '');
+}
+
+function wirePockyPanel() {
+    const imp = document.getElementById('cab_pocky_import');
+    const del = document.getElementById('cab_pocky_delete');
+    const info = document.getElementById('cab_pocky_info');
+    if (!imp || !del) return;
+    let busy = false;
+    const run = fn => async () => {
+        if (busy) return;
+        busy = true;
+        imp.classList.add('disabled'); del.classList.add('disabled');
+        try { await fn(); } catch (e) { console.error(LOG, e); toast.err(String(e?.message ?? e)); }
+        busy = false;
+        imp.classList.remove('disabled'); del.classList.remove('disabled');
+    };
+    imp.addEventListener('click', run(async () => {
+        if (!confirm('นำเข้า backup ล่าสุดของแต่ละแชท และจุดคืนค่าที่ตั้งชื่อไว้ จาก Pocky?\n(ประวัติอัตโนมัติอื่น ๆ จะไม่นำเข้า)')) return;
+        await flush();
+        const { added, skipped } = await importFromPocky(t => { info.textContent = t; });
+        toast.ok(`นำเข้า ${added} snapshot${skipped ? ` · ข้าม ${skipped} (ซ้ำหรือว่าง)` : ''}`, 'นำเข้าจาก Pocky');
+        await refreshPockyPanel();
+        updateIndicator();
+    }));
+    del.addEventListener('click', run(async () => {
+        if (pockyStillInstalled() && !confirm('Pocky ยังติดตั้งอยู่ ถ้าลบตอนนี้ มันจะเริ่มเก็บข้อมูลใหม่อีก ควรถอนการติดตั้ง Pocky ก่อน\n\nลบต่อเลยไหม?')) return;
+        if (!confirm('ลบฐานข้อมูลของ Pocky ทั้งหมดในเบราว์เซอร์นี้?\n\nสิ่งที่ยังไม่ได้นำเข้าจะหายถาวร — backup ของ Chat Auto Backup ไม่ได้รับผลกระทบ')) return;
+        const before = await storageUsed();
+        info.textContent = 'กำลังลบ…';
+        await deletePockyDb();
+        const after = await storageUsed();
+        toast.ok(before != null && after != null
+            ? `พื้นที่เบราว์เซอร์ ${fmtBytes(before)} → ${fmtBytes(after)} (Safari อาจอัปเดตตัวเลขช้า)`
+            : 'ลบแล้ว', 'ลบฐานข้อมูล Pocky แล้ว');
+        await refreshPockyPanel();
+    }));
+}
+
 async function init() {
     settings();
     renderSettings();
@@ -1251,6 +1472,8 @@ async function init() {
     try { await navigator.storage?.persist?.(); } catch { /* ignore */ }
     try { await db(); } catch (e) { toast.err('เปิด IndexedDB ไม่ได้: ' + (e?.message ?? e)); }
     updateIndicator();
+    wirePockyPanel();
+    refreshPockyPanel().catch(e => console.warn(LOG, e));
     console.log(LOG, 'loaded');
 }
 

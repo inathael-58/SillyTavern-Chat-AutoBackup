@@ -174,3 +174,8 @@
     border-radius: 4px;
     cursor: pointer;
 }
+
+/* ---------------------------------------------------------------- v1.4: Pocky leftovers */
+#cab_pocky[hidden] { display: none; }
+#cab_pocky .menu_button.disabled { opacity: 0.5; pointer-events: none; }
+#cab_modal .cab_note_tag { border-color: var(--SmartThemeQuoteColor, #e18a24); }
