@@ -32,6 +32,8 @@ const DEFAULTS = Object.freeze({
     // button can travel across the screen; `edge` is the screen edge it is
     // snapped to (null = free, e.g. after "reset to centre").
     indicatorPos: Object.freeze({ x: 1, y: 0.08, edge: 'right' }),
+    // Off-device copy of each chat's newest snapshot in the user's own Dropbox (App folder).
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2 }),
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -193,6 +195,16 @@ async function dbPutMeta(meta, sigs) {
     const tx = d.transaction([META, SIGS], 'readwrite');
     tx.objectStore(META).put(meta);
     if (sigs) tx.objectStore(SIGS).put({ id: meta.id, head: sigs.head, msgs: sigs.msgs });
+    await txDone(tx);
+}
+
+/** Mark a snapshot as uploaded — only if it still exists (it may have been merged or pruned meanwhile). */
+async function dbMarkCloud(id, ts) {
+    const d = await db();
+    const tx = d.transaction(META, 'readwrite');
+    const store = tx.objectStore(META);
+    const req = store.get(id);
+    req.onsuccess = () => { if (req.result) store.put({ ...req.result, cloud: ts }); };
     await txDone(tx);
 }
 
@@ -563,6 +575,7 @@ async function store(snap, { force = false, reason = 'auto' } = {}) {
     await prune(info.key);
 
     if (settings().notifyOnSave) toast.info(`${info.label}: ${snap.count} ข้อความ`, 'Backup แล้ว');
+    cloudSoon();
     return { id, meta };
 }
 
@@ -828,7 +841,7 @@ async function renderBrowser() {
                         ${peakIdByKey.get(m.key) === m.id ? '<span class="cab_tag cab_peak" title="snapshot ที่มีข้อความมากที่สุดของแชทนี้ — ไม่ถูกลบอัตโนมัติ">สูงสุด</span>' : ''}
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
-                        ${m.reason === 'import' ? `<span class="cab_tag">${m.source === 'pocky' ? 'จาก Pocky' : 'import'}</span>` : ''}
+                        ${m.reason === 'import' ? `<span class="cab_tag">${m.source === 'pocky' ? 'จาก Pocky' : m.source === 'dropbox' ? 'จาก Dropbox' : 'import'}</span>` : ''}
                         ${m.note ? `<span class="cab_tag cab_note_tag" title="จุดคืนค่าที่ตั้งชื่อไว้ใน Pocky — ไม่ถูกลบอัตโนมัติ">${escapeHtml(m.note)}</span>` : ''}
                     </div>
                     ${browserKey ? '' : `<div class="cab_sub">${escapeHtml(m.label)} — ${escapeHtml(m.chatId)}</div>`}
@@ -1111,6 +1124,31 @@ function renderSettings() {
                     <input type="file" id="cab_import_file" accept=".json,application/json" hidden>
                 </div>
                 <small class="cab_note">เก็บในเบราว์เซอร์นี้เท่านั้น (IndexedDB) — เครื่อง/เบราว์เซอร์อื่นมี backup แยกกัน ควรกด Export เก็บไว้เป็นระยะ</small>
+                <hr class="sysHR">
+                <b>สำรองขึ้น Dropbox</b>
+                <small id="cab_dbx_status" class="cab_note"></small>
+                <div id="cab_dbx_setup">
+                    <small class="cab_note">ตั้งค่าครั้งเดียว: สร้าง app ที่ <a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noopener">dropbox.com/developers/apps</a> (เลือก Scoped access · App folder) → แท็บ Permissions ติ๊ก <code>files.content.write</code> และ <code>files.content.read</code> แล้วกด Submit → คัดลอก App key จากแท็บ Settings มาวางด้านล่าง</small>
+                    <input id="cab_dbx_key" class="text_pole" placeholder="App key" autocomplete="off" autocapitalize="off" spellcheck="false">
+                    <div class="cab_buttons"><div id="cab_dbx_connect" class="menu_button">เชื่อมต่อ</div></div>
+                    <div id="cab_dbx_step2" hidden>
+                        <small class="cab_note">1. <a id="cab_dbx_link" target="_blank" rel="noopener">เปิดหน้าอนุญาตของ Dropbox</a> แล้วกด Allow<br>2. คัดลอกรหัสที่ Dropbox แสดง กลับมาวางตรงนี้</small>
+                        <input id="cab_dbx_code" class="text_pole" placeholder="รหัสจาก Dropbox" autocomplete="off" autocapitalize="off" spellcheck="false">
+                        <div class="cab_buttons"><div id="cab_dbx_confirm" class="menu_button">ยืนยันรหัส</div></div>
+                    </div>
+                </div>
+                <div id="cab_dbx_on" hidden>
+                    <label class="checkbox_label" title="ส่ง snapshot ล่าสุดของแชทที่เปลี่ยน ขึ้น Dropbox ทีละแชท ทับไฟล์เดิมของแชทนั้น"><input type="checkbox" id="cab_dbx_auto"> ส่งขึ้น Dropbox อัตโนมัติ</label>
+                    <div class="cab_grid">
+                        <label for="cab_dbx_interval">ส่งแต่ละแชทไม่ถี่กว่าทุก (นาที)</label>
+                        <input type="number" id="cab_dbx_interval" class="text_pole" min="1" max="120" step="1">
+                    </div>
+                    <div class="cab_buttons">
+                        <div id="cab_dbx_now" class="menu_button" title="ส่งทุกแชทที่ยังไม่ได้ส่ง ตอนนี้เลย">ส่งตอนนี้</div>
+                        <div id="cab_dbx_pull" class="menu_button" title="ดาวน์โหลดไฟล์แชทจาก Dropbox กลับมาเป็น snapshot (ไม่เขียนทับแชทบนเซิร์ฟเวอร์)">ดึง backup จาก Dropbox</div>
+                        <div id="cab_dbx_disconnect" class="menu_button">ยกเลิกการเชื่อมต่อ</div>
+                    </div>
+                </div>
                 <div id="cab_pocky" hidden>
                     <hr class="sysHR">
                     <b>ข้อมูลที่ Pocky chat vault ทิ้งไว้</b>
@@ -1250,7 +1288,394 @@ function wireEvents() {
     // Best effort on tab close: nothing async is guaranteed here, but a pending
     // write that's already in-flight usually completes.
     window.addEventListener('pagehide', () => flush());
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'hidden') return;
+        // Leaving the app: write what's pending, then push it off the device if we can.
+        flush().then(() => cloudTick({ ignoreGap: true })).catch(() => { /* next tick */ });
+    });
+}
+
+// ---------------------------------------------------------------- Dropbox sync
+//
+// One file per chat in the app's own Dropbox folder, always the newest snapshot:
+//   /character/<avatar>/<chat id>.jsonl      /group/<group id>/<chat id>.jsonl
+// Plain SillyTavern JSONL, so a file can also be imported into ST by hand.
+// Only one chat is ever in memory at a time; nothing reads the whole database.
+
+const DBX_API = 'https://api.dropboxapi.com';
+const DBX_CONTENT = 'https://content.dropboxapi.com';
+const cloud = {
+    token: '', tokenExp: 0,
+    running: false, again: null,
+    lastAt: new Map(),       // key -> ms of this session's last upload (per-chat pacing)
+    backoffUntil: 0,
+    lastOk: 0, pending: 0, withheld: [], error: '', progress: '',
+    soonTimer: null,
+};
+
+function dbxSettings() {
+    const s = settings();
+    if (!s.dropbox || typeof s.dropbox !== 'object') s.dropbox = { ...DEFAULTS.dropbox };
+    for (const [k, v] of Object.entries(DEFAULTS.dropbox)) if (s.dropbox[k] === undefined) s.dropbox[k] = v;
+    return s.dropbox;
+}
+
+function pendingVerifier() {
+    let v = dbxSettings().pendingVerifier;
+    if (!v) { try { v = localStorage.getItem('cab_dbx_verifier') || ''; } catch { /* ignore */ } }
+    return v;
+}
+
+const dbxConnected = () => !!(dbxSettings().refreshToken && dbxSettings().appKey);
+
+/** Dropbox-API-Arg is an HTTP header: JSON with every non-ASCII char as \uXXXX. */
+function dbxArg(obj) {
+    return JSON.stringify(obj).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
+// Path segments: percent-encode only what Dropbox or file systems dislike, so names stay readable.
+function dbxSeg(t) {
+    return String(t).replace(/[%\/\\<>:"|?*\u0000-\u001f]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))
+        .replace(/[. ]$/, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+function dbxUnseg(t) {
+    return String(t).replace(/%([0-9A-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+function dbxPathOf(m) {
+    const entity = m.type === 'group' ? m.groupId : m.avatar;
+    return `/${m.type === 'group' ? 'group' : 'character'}/${dbxSeg(entity)}/${dbxSeg(m.chatId)}.jsonl`;
+}
+
+function b64url(bytes) {
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function dbxError(res) {
+    const t = await res.text().catch(() => '');
+    try { const j = JSON.parse(t); return j.error_summary || j.error_description || j.error || t; } catch { return t || `${res.status} ${res.statusText}`; }
+}
+
+async function dbxToken() {
+    if (cloud.token && Date.now() < cloud.tokenExp - 60_000) return cloud.token;
+    const d = dbxSettings();
+    if (!d.refreshToken) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
+    const res = await fetch(`${DBX_API}/oauth2/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: d.refreshToken, client_id: d.appKey }),
+    });
+    if (!res.ok) {
+        const msg = await dbxError(res);
+        if (/invalid_grant|invalid_client/.test(msg)) {
+            d.refreshToken = '';
+            saveSettings();
+            renderDbxPanel();
+            throw new Error('Dropbox ยกเลิกสิทธิ์แล้ว — ต้องเชื่อมต่อใหม่');
+        }
+        throw new Error(`ขอสิทธิ์ Dropbox ไม่สำเร็จ: ${msg}`);
+    }
+    const j = await res.json();
+    cloud.token = j.access_token;
+    cloud.tokenExp = Date.now() + (Number(j.expires_in) || 14_400) * 1000;
+    return cloud.token;
+}
+
+async function dbxFetch(url, init = {}, retry = true) {
+    const token = await dbxToken();
+    const res = await fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+    if (res.status === 401 && retry) { cloud.token = ''; return dbxFetch(url, init, false); }
+    if (res.status === 429) {
+        cloud.backoffUntil = Date.now() + (Number(res.headers.get('Retry-After')) || 60) * 1000;
+        throw new Error('Dropbox ขอให้รอสักครู่');
+    }
+    return res;
+}
+
+async function dbxRpc(endpoint, body) {
+    const res = await dbxFetch(`${DBX_API}/2/${endpoint}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) { const e = new Error(await dbxError(res)); e.status = res.status; throw e; }
+    return await res.json();
+}
+
+async function dbxMetadata(path) {
+    try { return await dbxRpc('files/get_metadata', { path }); } catch (e) {
+        if (e.status === 409 && /not_found/.test(e.message)) return null;
+        throw e;
+    }
+}
+
+async function dbxUpload(path, blob, ts) {
+    const arg = { path, mode: 'overwrite', mute: true, autorename: false, client_modified: new Date(ts).toISOString().replace(/\.\d+Z$/, 'Z') };
+    const res = await dbxFetch(`${DBX_CONTENT}/2/files/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'Dropbox-API-Arg': dbxArg(arg) },
+        body: blob,
+    });
+    if (!res.ok) throw new Error(await dbxError(res));
+    return await res.json();
+}
+
+async function dbxDownloadText(path) {
+    const res = await dbxFetch(`${DBX_CONTENT}/2/files/download`, { method: 'POST', headers: { 'Dropbox-API-Arg': dbxArg({ path }) } });
+    if (!res.ok) throw new Error(await dbxError(res));
+    return await res.text();
+}
+
+/** Upload chats whose newest snapshot isn't in Dropbox yet. */
+async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } = {}) {
+    const d = dbxSettings();
+    if (!dbxConnected()) return;
+    if (!force && !ignoreGap && d.auto === false) return;
+    if (cloud.running) { cloud.again = { ignoreGap: ignoreGap || cloud.again?.ignoreGap }; return; }
+    if (!force && Date.now() < cloud.backoffUntil) return;
+    cloud.running = true;
+    cloud.error = '';
+    try {
+        const all = await dbAllMeta(); // metadata only, newest first
+        const newest = new Map();
+        for (const m of all) if (!newest.has(m.key)) newest.set(m.key, m);
+        const gap = Math.max(1, Number(d.intervalMin) || DEFAULTS.dropbox.intervalMin) * 60_000;
+        const due = [];
+        const withheld = [];
+        for (const [key, m] of newest) {
+            if (m.cloud) continue;
+            const forced = force && (!forceKeys || forceKeys.includes(key));
+            if (m.shrunk && !forced) { withheld.push({ key, label: m.label, why: 'แชทสั้นลงผิดปกติ' }); continue; }
+            if (!ignoreGap && Date.now() - (cloud.lastAt.get(key) || 0) < gap) continue;
+            due.push({ m, forced });
+        }
+        cloud.pending = due.length;
+        renderDbxStatus();
+        for (const { m, forced } of due) {
+            const text = await snapshotText(m.id);
+            const blob = new Blob([text], { type: 'application/octet-stream' });
+            const path = dbxPathOf(m);
+            if (!forced) {
+                // Never let a chat that came back truncated overwrite a fuller copy in Dropbox.
+                const remote = await dbxMetadata(path);
+                if (remote?.size > 20_000 && blob.size < remote.size * 0.6) {
+                    withheld.push({ key: m.key, label: m.label, why: `ไฟล์บน Dropbox ใหญ่กว่ามาก (${fmtBytes(remote.size)} → ${fmtBytes(blob.size)})` });
+                    cloud.pending--;
+                    continue;
+                }
+            }
+            await dbxUpload(path, blob, m.ts);
+            m.cloud = Date.now();
+            await dbMarkCloud(m.id, m.cloud);
+            cloud.lastAt.set(m.key, m.cloud);
+            cloud.lastOk = m.cloud;
+            cloud.pending--;
+            renderDbxStatus();
+        }
+        cloud.withheld = withheld;
+    } catch (e) {
+        console.warn(LOG, 'Dropbox sync', e);
+        cloud.error = String(e?.message ?? e);
+        cloud.backoffUntil = Math.max(cloud.backoffUntil, Date.now() + 60_000);
+    } finally {
+        cloud.running = false;
+        renderDbxStatus();
+        if (cloud.again) { const a = cloud.again; cloud.again = null; setTimeout(() => cloudTick(a), 1000); }
+    }
+}
+
+/** After a snapshot is written: sync shortly (pacing still applies). */
+function cloudSoon() {
+    if (!dbxConnected()) return;
+    clearTimeout(cloud.soonTimer);
+    cloud.soonTimer = setTimeout(() => cloudTick(), 3000);
+}
+
+/** Download every chat file from Dropbox into local snapshots. */
+async function cloudPull(progress) {
+    const files = [];
+    let page = await dbxRpc('files/list_folder', { path: '', recursive: true, limit: 2000 });
+    for (;;) {
+        for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl$/i.test(e.name)) files.push(e);
+        if (!page.has_more) break;
+        page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
+    }
+    const all = await dbAllMeta();
+    for (const m of all) if ((m.sv || 0) < SNAP_VERSION) { try { await upgradeSnapshot(m); } catch { /* ignore */ } }
+    const seen = new Set(all.map(m => `${m.key}|${m.hash}`));
+    const c = ctx();
+    let added = 0, skipped = 0;
+    for (let i = 0; i < files.length; i++) {
+        progress?.(`กำลังดึง ${i + 1}/${files.length}…`);
+        const f = files[i];
+        const parts = String(f.path_display || '').split('/').filter(Boolean);
+        if (parts.length !== 3 || !['character', 'group'].includes(parts[0])) { skipped++; continue; }
+        const isGroup = parts[0] === 'group';
+        const entity = dbxUnseg(parts[1]);
+        const chatId = dbxUnseg(parts[2].replace(/\.jsonl$/i, ''));
+        const key = `${isGroup ? 'g' : 'c'}:${entity}:${chatId}`;
+        let text, d;
+        try { text = await dbxDownloadText(f.path_lower); d = deriveFromJsonl(text); } catch (e) { console.warn(LOG, e); skipped++; continue; }
+        if (!d.count || seen.has(`${key}|${d.hash}`)) { skipped++; continue; }
+        let label = entity;
+        if (isGroup) label = (c.groups || []).find(g => String(g.id) === entity)?.name ?? `Group ${entity}`;
+        else {
+            label = (c.characters || []).find(ch => ch.avatar === entity)?.name ?? label;
+            try { const h = JSON.parse(text.slice(0, text.indexOf('\n'))); if (label === entity && h?.character_name) label = h.character_name; } catch { /* ignore */ }
+        }
+        const packed = await pack(text);
+        const meta = {
+            key, type: isGroup ? 'group' : 'character', chatId,
+            groupId: isGroup ? entity : null, avatar: isGroup ? null : entity, label,
+            ts: Date.parse(f.client_modified) || Date.parse(f.server_modified) || Date.now(),
+            hash: d.hash, count: d.count, preview: d.preview, previewName: d.previewName, swipe: d.swipe,
+            rawSize: text.length, size: packed.enc === 'gzip' ? packed.data.size : text.length,
+            reason: 'import', source: 'dropbox', shrunk: false, mergedSwipes: 0, sv: SNAP_VERSION,
+            cloud: Date.now(),
+        };
+        await dbAdd(meta, packed, d.sigs);
+        seen.add(`${key}|${d.hash}`);
+        added++;
+        text = null;
+    }
+    return { added, skipped, total: files.length };
+}
+
+function renderDbxStatus() {
+    const el = document.getElementById('cab_dbx_status');
+    if (!el) return;
+    if (!dbxConnected()) {
+        el.textContent = pendingVerifier() ? 'รอรหัสจาก Dropbox…' : 'ยังไม่ได้เชื่อมต่อ';
+        return;
+    }
+    const parts = ['เชื่อมต่อแล้ว'];
+    if (dbxSettings().auto === false) parts.push('ปิดการส่งอัตโนมัติ');
+    if (cloud.progress) parts.push(cloud.progress);
+    else if (cloud.running) parts.push(cloud.pending ? `กำลังส่ง… (เหลือ ${cloud.pending} แชท)` : 'กำลังตรวจ…');
+    if (cloud.lastOk) parts.push(`ส่งล่าสุด ${fmtTime(cloud.lastOk).slice(11, 16)}`);
+    if (cloud.withheld.length) parts.push(`ไม่ส่ง ${cloud.withheld.length} แชท (${cloud.withheld.map(w => `${w.label}: ${w.why}`).join('; ')}) — กด "ส่งตอนนี้" ถ้าตั้งใจ`);
+    if (cloud.error) parts.push(`⚠ ${cloud.error} (จะลองใหม่เอง)`);
+    el.textContent = parts.join(' · ');
+}
+
+function renderDbxPanel() {
+    const on = dbxConnected();
+    const setup = document.getElementById('cab_dbx_setup');
+    const onBox = document.getElementById('cab_dbx_on');
+    if (!setup || !onBox) return;
+    setup.hidden = on;
+    onBox.hidden = !on;
+    // Keep the code box visible after a reload, so a code copied from Dropbox can still be pasted.
+    document.getElementById('cab_dbx_step2').hidden = on || !pendingVerifier();
+    const link = document.getElementById('cab_dbx_link');
+    link.hidden = !link.getAttribute('href');
+    renderDbxStatus();
+}
+
+function wireDbxPanel() {
+    const $ = id => document.getElementById(id);
+    if (!$('cab_dbx_setup')) return;
+    const d = dbxSettings();
+    $('cab_dbx_key').value = d.appKey;
+    $('cab_dbx_auto').checked = d.auto !== false;
+    $('cab_dbx_interval').value = d.intervalMin;
+
+    let busy = false;
+    const run = (btn, fn) => async () => {
+        if (busy) return;
+        busy = true;
+        btn.classList.add('disabled');
+        try { await fn(); } catch (e) { console.error(LOG, e); toast.err(String(e?.message ?? e), 'Dropbox'); }
+        busy = false;
+        btn.classList.remove('disabled');
+        renderDbxPanel();
+    };
+
+    $('cab_dbx_connect').addEventListener('click', run($('cab_dbx_connect'), async () => {
+        const key = $('cab_dbx_key').value.trim();
+        if (!/^[a-z0-9]{8,32}$/i.test(key)) { toast.warn('วาง App key จากแท็บ Settings ของ app ใน Dropbox', 'Dropbox'); return; }
+        const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+        let challenge = verifier, method = 'plain';
+        if (crypto.subtle) {
+            challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+            method = 'S256';
+        }
+        d.appKey = key;
+        d.pendingVerifier = verifier;
+        saveSettings();
+        try { localStorage.setItem('cab_dbx_verifier', verifier); } catch { /* ignore */ }
+        // A real link (not window.open after an await) so iOS never blocks it as a pop-up.
+        $('cab_dbx_link').href = `https://www.dropbox.com/oauth2/authorize?${new URLSearchParams({
+            client_id: key, response_type: 'code', token_access_type: 'offline', code_challenge: challenge, code_challenge_method: method,
+        })}`;
+        $('cab_dbx_code').value = '';
+    }));
+
+    $('cab_dbx_confirm').addEventListener('click', run($('cab_dbx_confirm'), async () => {
+        const code = $('cab_dbx_code').value.trim();
+        if (!code) { toast.warn('วางรหัสที่ Dropbox แสดงหลังกด Allow', 'Dropbox'); return; }
+        const res = await fetch(`${DBX_API}/oauth2/token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ grant_type: 'authorization_code', code, client_id: d.appKey, code_verifier: pendingVerifier() }),
+        });
+        if (!res.ok) throw new Error(`ยืนยันรหัสไม่สำเร็จ: ${await dbxError(res)} — กด "เชื่อมต่อ" แล้วขอรหัสใหม่`);
+        const j = await res.json();
+        if (!j.refresh_token) throw new Error('Dropbox ไม่ได้ให้สิทธิ์แบบค้างไว้ (ไม่มี refresh token)');
+        d.refreshToken = j.refresh_token;
+        d.pendingVerifier = '';
+        try { localStorage.removeItem('cab_dbx_verifier'); } catch { /* ignore */ }
+        cloud.token = j.access_token;
+        cloud.tokenExp = Date.now() + (Number(j.expires_in) || 14_400) * 1000;
+        saveSettings();
+        toast.ok('เชื่อมต่อแล้ว กำลังส่ง backup ขึ้นไป', 'Dropbox');
+        renderDbxPanel();
+        cloudTick({ ignoreGap: true });
+    }));
+
+    $('cab_dbx_auto').addEventListener('change', e => { d.auto = e.target.checked; saveSettings(); renderDbxStatus(); if (d.auto) cloudTick(); });
+    $('cab_dbx_interval').addEventListener('change', e => {
+        const v = Math.round(Number(e.target.value));
+        d.intervalMin = Number.isFinite(v) && v >= 1 && v <= 120 ? v : DEFAULTS.dropbox.intervalMin;
+        e.target.value = d.intervalMin;
+        saveSettings();
+    });
+
+    $('cab_dbx_now').addEventListener('click', run($('cab_dbx_now'), async () => {
+        await flush();
+        await cloudTick({ ignoreGap: true });
+        if (cloud.withheld.length) {
+            const list = cloud.withheld.map(w => `• ${w.label}: ${w.why}`).join('\n');
+            if (confirm(`แชทเหล่านี้ไม่ได้ส่ง เพราะดูเหมือนข้อความหายไป:\n${list}\n\nส่งทับไฟล์บน Dropbox เลยไหม? (Dropbox เก็บประวัติเวอร์ชันเดิมไว้ให้กู้ได้ประมาณ 30 วัน)`)) {
+                await cloudTick({ ignoreGap: true, force: true, forceKeys: cloud.withheld.map(w => w.key) });
+            }
+        }
+        if (cloud.error) throw new Error(cloud.error);
+        toast.ok('ส่งขึ้น Dropbox แล้ว', 'Dropbox');
+    }));
+
+    $('cab_dbx_pull').addEventListener('click', run($('cab_dbx_pull'), async () => {
+        if (!confirm('ดึงไฟล์แชททั้งหมดจาก Dropbox กลับมาเป็น snapshot ในเครื่องนี้?\n(แชทบนเซิร์ฟเวอร์ไม่ถูกแก้ — กู้คืนเองได้จากรายการ backup)')) return;
+        try {
+            const r = await cloudPull(t => { cloud.progress = t; renderDbxStatus(); });
+            toast.ok(`ได้ ${r.added} snapshot จาก ${r.total} ไฟล์${r.skipped ? ` · ข้าม ${r.skipped} (มีอยู่แล้วหรืออ่านไม่ได้)` : ''}`, 'ดึงจาก Dropbox');
+        } finally {
+            cloud.progress = '';
+            updateIndicator();
+        }
+    }));
+
+    $('cab_dbx_disconnect').addEventListener('click', run($('cab_dbx_disconnect'), async () => {
+        if (!confirm('ยกเลิกการเชื่อมต่อ Dropbox?\n(ไฟล์ที่ส่งไปแล้วยังอยู่ใน Dropbox)')) return;
+        try { await dbxFetch(`${DBX_API}/2/auth/token/revoke`, { method: 'POST' }, false); } catch { /* token may already be dead */ }
+        d.refreshToken = '';
+        d.pendingVerifier = '';
+        cloud.token = '';
+        saveSettings();
+    }));
+
+    renderDbxPanel();
+    setInterval(() => cloudTick(), 30_000);
+    if (dbxConnected()) setTimeout(() => cloudTick(), 5000);
 }
 
 // ---------------------------------------------------------------- leftovers from Pocky chat vault
@@ -1472,12 +1897,13 @@ async function init() {
     try { await navigator.storage?.persist?.(); } catch { /* ignore */ }
     try { await db(); } catch (e) { toast.err('เปิด IndexedDB ไม่ได้: ' + (e?.message ?? e)); }
     updateIndicator();
+    wireDbxPanel();
     wirePockyPanel();
     refreshPockyPanel().catch(e => console.warn(LOG, e));
     console.log(LOG, 'loaded');
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull };
 
 if (typeof jQuery === 'function') jQuery(init); else init();

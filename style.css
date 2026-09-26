@@ -179,3 +179,9 @@
 #cab_pocky[hidden] { display: none; }
 #cab_pocky .menu_button.disabled { opacity: 0.5; pointer-events: none; }
 #cab_modal .cab_note_tag { border-color: var(--SmartThemeQuoteColor, #e18a24); }
+
+/* ---------------------------------------------------------------- v1.5: Dropbox */
+#cab_dbx_setup[hidden], #cab_dbx_on[hidden], #cab_dbx_step2[hidden], #cab_dbx_link[hidden] { display: none; }
+#cab_dbx_setup .text_pole, #cab_dbx_step2 .text_pole { width: 100%; box-sizing: border-box; margin: 4px 0; }
+.cab_settings .menu_button.disabled { opacity: 0.5; pointer-events: none; }
+.cab_settings .cab_note a { text-decoration: underline; }
