@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '1.8.1'; // keep in sync with manifest.json
+const VERSION = '1.8.2'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -453,16 +453,18 @@ function captureNow() {
 
     const lines = [];
     let head = '';
-    if (info.type === 'character') {
-        const h = JSON.stringify({
+    // Same header SillyTavern writes, so chat metadata (extension state, variables,
+    // author's note…) is backed up and synced along with the messages.
+    const h = info.type === 'character'
+        ? JSON.stringify({
             user_name: c.name1,
             character_name: c.name2,
             create_date: messages[0]?.send_date ?? stableCreateDate(info.key),
             chat_metadata: c.chatMetadata ?? c.chat_metadata ?? {},
-        });
-        lines.push(h);
-        head = hash(h);
-    }
+        })
+        : JSON.stringify({ chat_metadata: c.chatMetadata ?? c.chat_metadata ?? {}, user_name: 'unused', character_name: 'unused' });
+    lines.push(h);
+    head = hash(h);
     const msgs = [];
     for (const m of messages) {
         const j = JSON.stringify(m);
@@ -1543,7 +1545,15 @@ function wireEvents() {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') { checkForNewVersion(); syncSoon(); }
         if (document.visibilityState !== 'hidden') return;
-        // Leaving the app: write what's pending, then push it off the device if we can.
+        // Leaving the app: write what's pending (including a change with no message event,
+        // e.g. an extension updating chat metadata), then push it off the device if we can.
+        if (settings().enabled) {
+            const snap = captureNow();
+            if (snap && lastHashByKey.get(snap.info.key) !== snap.hash) {
+                if (pending && pending.info.key !== snap.info.key) flush();
+                pending = snap;
+            }
+        }
         flush().then(() => cloudTick({ ignoreGap: true })).catch(() => { /* next tick */ });
     });
 }
@@ -1780,30 +1790,39 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                     const base = known?.skipped ? null : known; // "skip" in the sync dialog is no agreement
                     // Same messages as Dropbox already has (only the chat header differs, e.g.
                     // right after a sync rewrote this chat): nothing worth sending.
-                    if (base && base.rev === remote.rev && base.sig === mine.sig) { await markSent(); continue; }
+                    if (base && base.rev === remote.rev && base.sig === mine.sig && base.meta !== undefined && metaEq(base.meta, mine.meta)) { await markSent(); continue; }
                     if (!base || base.rev !== remote.rev) {
                         // Dropbox changed since this browser last matched it (another device or ST
                         // server uploaded). Only send ours if it grew out of what is there.
                         const rText = await dbxDownloadText(`rev:${remote.rev}`);
                         const r = chatState(parseJsonl(rText));
-                        if (r.sig === mine.sig) {
-                            setSyncBase(m.key, { rev: remote.rev, sig: mine.sig });
+                        if (r.sig === mine.sig && metaEq(r.meta, mine.meta)) {
+                            setSyncBase(m.key, { rev: remote.rev, sig: mine.sig, meta: mine.meta ?? r.meta });
                             await markSent();
                             continue;
                         }
-                        // Ours is still what we last matched, so Dropbox holds a newer change
-                        // (maybe deleted messages): sending ours would undo it.
-                        if (base && base.sig === mine.sig) {
-                            hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
-                            continue;
-                        }
-                        // Messages there unchanged since we last matched (only its header moved on)?
-                        const unchanged = base && base.sig === r.sig;
                         const rHash = jsonlHash(rText);
                         const ownOldCopy = !!rHash && all.some(x => x.key === m.key && x.hash === rHash);
-                        if (!unchanged && !ownOldCopy && !isAncestor(r, mine)) {
-                            hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
-                            continue;
+                        if (r.sig === mine.sig) {
+                            // Same messages, different chat metadata: send ours only if Dropbox's
+                            // metadata hasn't changed since we last matched; otherwise the sync merges.
+                            if (!ownOldCopy && !(base && base.meta === r.meta)) {
+                                hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
+                                continue;
+                            }
+                        } else {
+                            // Ours is still what we last matched, so Dropbox holds a newer change
+                            // (maybe deleted messages): sending ours would undo it.
+                            if (base && base.sig === mine.sig) {
+                                hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
+                                continue;
+                            }
+                            // Messages there unchanged since we last matched (only its header moved on)?
+                            const unchanged = base && base.sig === r.sig;
+                            if (!unchanged && !ownOldCopy && !isAncestor(r, mine)) {
+                                hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
+                                continue;
+                            }
                         }
                     }
                     // Never let a chat that came back truncated overwrite a fuller copy in Dropbox.
@@ -1824,7 +1843,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                 hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
                 continue;
             }
-            setSyncBase(m.key, { rev: up.rev, sig: mine.sig });
+            setSyncBase(m.key, { rev: up.rev, sig: mine.sig, meta: mine.meta });
             m.cloud = Date.now();
             await dbMarkCloud(m.id, m.cloud);
             setCloudRecord(m.key, { ts: m.cloud, count: m.count });
@@ -2100,7 +2119,7 @@ function wireDbxPanel() {
 // chat header, so the same chat on two servers compares equal.
 
 const sync = { decisions: [], missing: [], notified: new Set(), lastAt: 0, applied: 0, error: '', progress: '', timer: null };
-const AUTO_KINDS = ['forward', 'changed', 'create'];
+const AUTO_KINDS = ['forward', 'changed', 'create', 'meta'];
 
 function syncStoreKey() { return `cab_sync_base:${dbxSettings().appKey || ''}`; }
 function syncBases() {
@@ -2145,8 +2164,27 @@ function chatState(arr) {
     const head = list.length && !('mes' in list[0]) ? list[0] : null;
     const msgs = head ? list.slice(1) : list;
     const keys = msgs.map(syncMsgKey);
-    return { head, msgs, keys, sig: hash(keys.join('\n')), count: msgs.length };
+    return { head, msgs, keys, sig: hash(keys.join('\n')), meta: metaSig(head), count: msgs.length };
 }
+
+// Chat metadata keys that differ per server or per load and say nothing about the chat.
+const META_VOLATILE = ['integrity', 'tainted', 'lastInContextMessageId'];
+
+function stableJson(v) {
+    if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+    if (v && typeof v === 'object') return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(',')}}`;
+    return JSON.stringify(v) ?? 'null';
+}
+
+/** Signature of a chat's metadata; null when the file has no header (unknown, never a difference). */
+function metaSig(head) {
+    if (!head) return null;
+    const m = { ...(head.chat_metadata ?? {}) };
+    for (const k of META_VOLATILE) delete m[k];
+    return hash(stableJson(m));
+}
+
+const metaEq = (a, b) => a == null || b == null || a === b;
 
 /** True when b is a continued from a: same messages, then more (b may also have more swipes on a's last). */
 function isAncestor(a, b) {
@@ -2205,12 +2243,12 @@ function uuid() {
 }
 
 /** Write `remote`'s messages into the server's chat file, keeping the server's own header details. */
-async function writeServerChat(t, remote, local) {
+async function writeServerChat(t, remote, local, chatMeta = remote.head?.chat_metadata ?? local.head?.chat_metadata ?? {}) {
     const c = ctx();
     const old = local.head || {};
     const src = remote.head || {};
     // A fresh integrity slug makes any other tab still holding the old copy refuse to save over it.
-    const meta = { ...(src.chat_metadata ?? old.chat_metadata ?? {}), integrity: uuid() };
+    const meta = { ...chatMeta, integrity: uuid() };
     const head = t.type === 'group'
         ? { ...old, ...src, user_name: 'unused', character_name: 'unused', chat_metadata: meta }
         : {
@@ -2283,21 +2321,29 @@ async function syncClassify(f, t) {
     if (!remote.count) return null;
     // Same messages as when we last matched; only the header changed (e.g. the other side
     // re-saved it after a sync). Anything new here is for the upload to send.
-    if (base && !base.skipped && base.sig === remote.sig) { setSyncBase(t.key, { rev: f.rev, sig: remote.sig }); return null; }
+    if (base && !base.skipped && base.sig === remote.sig && base.meta !== undefined && metaEq(base.meta, remote.meta)) {
+        setSyncBase(t.key, { rev: f.rev, sig: remote.sig, meta: base.meta });
+        return null;
+    }
     const local = chatState(await serverChat(t));
     const item = {
         t, rev: f.rev, path: f.path_lower, when: Date.parse(f.client_modified) || Date.parse(f.server_modified) || 0,
-        remote: { count: remote.count, sig: remote.sig, keys: remote.keys },
-        local: { count: local.count, sig: local.sig, keys: local.keys },
+        remote: { count: remote.count, sig: remote.sig, keys: remote.keys, meta: remote.meta },
+        local: { count: local.count, sig: local.sig, keys: local.keys, meta: local.meta },
     };
-    const agree = () => { setSyncBase(t.key, { rev: f.rev, sig: remote.sig }); return null; };
+    const agree = () => { setSyncBase(t.key, { rev: f.rev, sig: remote.sig, meta: remote.meta ?? local.meta }); return null; };
 
     if (!local.count) {
         if (base && !base.skipped) return { ...item, kind: 'gone' };
         const since = Number(dbxSettings().syncSince) || 0;
         return { ...item, kind: !base && since && (Date.parse(f.server_modified) || 0) >= since ? 'create' : 'new' };
     }
-    if (local.sig === remote.sig) return agree();
+    if (local.sig === remote.sig) {
+        if (metaEq(local.meta, remote.meta)) return agree();
+        // Same messages, different chat metadata (memory, variables… kept by extensions).
+        if (base && !base.skipped && base.meta === remote.meta) return agree(); // only this side changed it: the upload sends it
+        return { ...item, kind: 'meta' };
+    }
     // Unchanged here since we last matched: whatever Dropbox has now is the other side's
     // doing — including deleted messages, which the prefix tests below can't tell apart.
     if (base && !base.skipped && base.sig === local.sig) {
@@ -2322,17 +2368,29 @@ async function syncUseRemote(item, { asNewChat = false } = {}) {
     if (!remote.count) throw new Error('ไฟล์บน Dropbox ว่างเปล่า');
     const localArr = asNewChat ? [] : await serverChat(t);
     const local = chatState(localArr);
+    // Chat metadata: Dropbox's, unless this side changed it too since the last match — then
+    // keep this side's keys that Dropbox lacks (Dropbox wins on keys both have).
+    const base = asNewChat ? null : syncBase(t.key);
+    const remoteMeta = remote.head?.chat_metadata, localMeta = local.head?.chat_metadata;
+    const localMetaKept = base && !base.skipped && base.meta === local.meta;
+    const chatMeta = !remoteMeta ? (localMeta ?? {})
+        : (!local.count || localMetaKept || metaEq(local.meta, remote.meta)) ? remoteMeta
+        : { ...(localMeta ?? {}), ...remoteMeta };
     const now = Date.now();
-    if (local.count) await addSnapshotText(t, toJsonl(localArr), { source: 'before-sync', ts: now - 1 });
-    await writeServerChat(t, remote, local);
+    const nothingToWrite = local.count && local.sig === remote.sig && metaSig({ chat_metadata: chatMeta }) === local.meta;
+    if (!nothingToWrite) {
+        if (local.count) await addSnapshotText(t, toJsonl(localArr), { source: 'before-sync', ts: now - 1 });
+        await writeServerChat(t, remote, local, chatMeta);
+    }
     if (!asNewChat) {
         if (remote.count < local.count) await ackShrink(t.key); // fewer messages on purpose, not a broken load
         await addSnapshotText(t, remoteText, { source: 'dropbox', cloud: now, ts: now });
-        setSyncBase(t.key, { rev: item.rev, sig: remote.sig });
+        // Base = what Dropbox holds; if merged metadata differs from it, the upload sends ours.
+        setSyncBase(t.key, { rev: item.rev, sig: remote.sig, meta: remote.meta ?? local.meta });
         setCloudRecord(t.key, { ts: now, count: remote.count });
         cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
     }
-    if (isOpen && typeof ctx().reloadCurrentChat === 'function') await ctx().reloadCurrentChat();
+    if (isOpen && !nothingToWrite && typeof ctx().reloadCurrentChat === 'function') await ctx().reloadCurrentChat();
     return t;
 }
 
@@ -2353,7 +2411,7 @@ async function syncUseLocal(item) {
     }
     const now = Date.now();
     await addSnapshotText(t, text, { source: 'before-sync', cloud: now, ts: now });
-    setSyncBase(t.key, { rev: up.rev, sig: st.sig });
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta });
     setCloudRecord(t.key, { ts: now, count: st.count });
     cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
 }
