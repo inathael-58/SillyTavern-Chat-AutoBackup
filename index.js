@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '1.7.0'; // keep in sync with manifest.json
+const VERSION = '1.8.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -35,7 +35,9 @@ const DEFAULTS = Object.freeze({
     // snapped to (null = free, e.g. after "reset to centre").
     indicatorPos: Object.freeze({ x: 1, y: 0.08, edge: 'right' }),
     // Off-device copy of each chat's newest snapshot in the user's own Dropbox (App folder).
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full' }), // 'full' | 'short' | 'off'
+    // syncAuto: write chats that are newer in Dropbox (from another device or ST server) back into this server.
+    // syncSince: when sync was first used on this server — older Dropbox-only chats are offered, not created.
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0 }), // indicatorStyle: 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -850,6 +852,9 @@ async function renderBrowser() {
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
                         ${m.cloud && m.source !== 'dropbox' ? `<span class="cab_tag cab_db_tag" title="ส่งขึ้น Dropbox แล้วเมื่อ ${fmtTime(m.cloud)}">Dropbox</span>` : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
+                        ${m.reason === 'sync' ? (m.source === 'before-sync'
+                            ? '<span class="cab_tag" title="ฉบับในเครื่องก่อนถูกเขียนทับด้วยฉบับจาก Dropbox ตอนซิงค์">ก่อนซิงค์</span>'
+                            : '<span class="cab_tag" title="ฉบับที่ซิงค์มาจาก Dropbox แล้วเขียนลงเซิร์ฟเวอร์นี้">ซิงค์จาก Dropbox</span>') : ''}
                         ${m.reason === 'import' ? `<span class="cab_tag">${m.source === 'pocky' ? 'จาก Pocky' : m.source === 'dropbox' ? 'จาก Dropbox' : 'import'}</span>` : ''}
                         ${m.note ? `<span class="cab_tag cab_note_tag" title="จุดคืนค่าที่ตั้งชื่อไว้ใน Pocky — ไม่ถูกลบอัตโนมัติ">${escapeHtml(m.note)}</span>` : ''}
                     </div>
@@ -1217,6 +1222,15 @@ async function showAttention() {
                 } },
             ],
         });
+    } else if (held?.kind === 'diverged') {
+        problems.push({
+            title: 'แชทนี้ถูกแก้จากอีกเครื่อง',
+            body: `<p>ไฟล์บน Dropbox เปลี่ยนไปหลังจากที่เครื่องนี้ซิงค์ครั้งล่าสุด (เช่น เล่นต่อใน ST อีกที่หรือ TauriTavern) ระบบจึงยังไม่ส่งแชทในเครื่องทับ</p>
+                <p><b>ซิงค์แชทนี้</b> — ถ้าอีกเครื่องแค่คุยต่อ จะดึงข้อความใหม่มาใส่แชทนี้ให้เลย ถ้าแก้ทั้งสองฝั่ง จะให้เลือกว่าใช้ฉบับไหน</p>`,
+            actions: [
+                { label: 'ซิงค์แชทนี้', primary: true, run: async () => { await syncNow({ only: info }); } },
+            ],
+        });
     } else if (held) {
         problems.push({
             title: 'ยังไม่ได้ส่งแชทนี้ขึ้น Dropbox',
@@ -1368,6 +1382,15 @@ function renderSettings() {
                         <div id="cab_dbx_pull" class="menu_button" title="ดาวน์โหลดไฟล์แชทจาก Dropbox กลับมาเป็น snapshot (ไม่เขียนทับแชทบนเซิร์ฟเวอร์)">ดึง backup จาก Dropbox</div>
                         <div id="cab_dbx_disconnect" class="menu_button">ยกเลิกการเชื่อมต่อ</div>
                     </div>
+                    <hr class="sysHR">
+                    <b>ซิงค์แชทระหว่างเครื่อง</b>
+                    <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
+                    <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้)"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
+                    <small id="cab_sync_status" class="cab_note"></small>
+                    <div class="cab_buttons">
+                        <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
+                        <div id="cab_sync_decide" class="menu_button" hidden>เลือกฉบับ</div>
+                    </div>
                 </div>
                 <div id="cab_pocky" hidden>
                     <hr class="sysHR">
@@ -1509,7 +1532,7 @@ function wireEvents() {
     // write that's already in-flight usually completes.
     window.addEventListener('pagehide', () => flush());
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') checkForNewVersion();
+        if (document.visibilityState === 'visible') { checkForNewVersion(); syncSoon(); }
         if (document.visibilityState !== 'hidden') return;
         // Leaving the app: write what's pending, then push it off the device if we can.
         flush().then(() => cloudTick({ ignoreGap: true })).catch(() => { /* next tick */ });
@@ -1668,8 +1691,13 @@ async function dbxMetadata(path) {
     }
 }
 
-async function dbxUpload(path, blob, ts) {
-    const arg = { path, mode: 'overwrite', mute: true, autorename: false, client_modified: new Date(ts).toISOString().replace(/\.\d+Z$/, 'Z') };
+/**
+ * mode: 'overwrite' (default) · 'add' (fail if the file exists) · { update: rev } (fail if the
+ * file is no longer at that revision — someone else uploaded meanwhile). Failures read "…conflict…".
+ */
+async function dbxUpload(path, blob, ts, mode = 'overwrite') {
+    const m = mode && typeof mode === 'object' ? { '.tag': 'update', update: mode.update } : mode;
+    const arg = { path, mode: m, mute: true, autorename: false, client_modified: new Date(ts).toISOString().replace(/\.\d+Z$/, 'Z') };
     const res = await dbxFetch(`${DBX_CONTENT}/2/files/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream', 'Dropbox-API-Arg': dbxArg(arg) },
@@ -1711,19 +1739,78 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } 
         cloud.pending = due.length;
         renderDbxStatus();
         for (const { m, forced } of due) {
-            const text = await snapshotText(m.id);
+            const hold = (why, kind = 'bigger') => { withheld.push({ key: m.key, label: m.label, why, kind }); cloud.pending--; };
+            let text = await snapshotText(m.id);
+            if (text.includes('"tt_swipe_cold"')) {
+                // TauriTavern "load historical swipes on demand": the chat in memory lacks older
+                // swipes, so send the server's full file instead of the snapshot.
+                const t = syncTargetOf(m.type, m.type === 'group' ? m.groupId : m.avatar, m.chatId);
+                const arr = t.missing ? [] : await serverChat(t);
+                if (chatState(arr).count < m.count) { hold('อ่านแชทฉบับเต็มจากเซิร์ฟเวอร์ไม่ได้'); continue; }
+                text = toJsonl(arr);
+            }
             const blob = new Blob([text], { type: 'application/octet-stream' });
             const path = dbxPathOf(m);
+            const mine = chatState(parseJsonl(text));
+            let mode = 'overwrite';
             if (!forced) {
-                // Never let a chat that came back truncated overwrite a fuller copy in Dropbox.
                 const remote = await dbxMetadata(path);
-                if (remote?.size > 20_000 && blob.size < remote.size * 0.6) {
-                    withheld.push({ key: m.key, label: m.label, why: `ไฟล์บน Dropbox ใหญ่กว่ามาก (${fmtBytes(remote.size)} → ${fmtBytes(blob.size)})` });
+                const markSent = async () => {
+                    m.cloud = Date.now();
+                    await dbMarkCloud(m.id, m.cloud);
+                    setCloudRecord(m.key, { ts: m.cloud, count: m.count });
                     cloud.pending--;
-                    continue;
+                };
+                if (remote) {
+                    const known = syncBase(m.key);
+                    const base = known?.skipped ? null : known; // "skip" in the sync dialog is no agreement
+                    // Same messages as Dropbox already has (only the chat header differs, e.g.
+                    // right after a sync rewrote this chat): nothing worth sending.
+                    if (base && base.rev === remote.rev && base.sig === mine.sig) { await markSent(); continue; }
+                    if (!base || base.rev !== remote.rev) {
+                        // Dropbox changed since this browser last matched it (another device or ST
+                        // server uploaded). Only send ours if it grew out of what is there.
+                        const rText = await dbxDownloadText(`rev:${remote.rev}`);
+                        const r = chatState(parseJsonl(rText));
+                        if (r.sig === mine.sig) {
+                            setSyncBase(m.key, { rev: remote.rev, sig: mine.sig });
+                            await markSent();
+                            continue;
+                        }
+                        // Ours is still what we last matched, so Dropbox holds a newer change
+                        // (maybe deleted messages): sending ours would undo it.
+                        if (base && base.sig === mine.sig) {
+                            hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
+                            continue;
+                        }
+                        // Messages there unchanged since we last matched (only its header moved on)?
+                        const unchanged = base && base.sig === r.sig;
+                        const rHash = jsonlHash(rText);
+                        const ownOldCopy = !!rHash && all.some(x => x.key === m.key && x.hash === rHash);
+                        if (!unchanged && !ownOldCopy && !isAncestor(r, mine)) {
+                            hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
+                            continue;
+                        }
+                    }
+                    // Never let a chat that came back truncated overwrite a fuller copy in Dropbox.
+                    if (remote.size > 20_000 && blob.size < remote.size * 0.6) {
+                        hold(`ไฟล์บน Dropbox ใหญ่กว่ามาก (${fmtBytes(remote.size)} → ${fmtBytes(blob.size)})`);
+                        continue;
+                    }
+                    mode = { update: remote.rev };
+                } else {
+                    mode = 'add';
                 }
             }
-            await dbxUpload(path, blob, m.ts);
+            let up;
+            try {
+                up = await dbxUpload(path, blob, m.ts, mode);
+            } catch (e) {
+                if (!/conflict/.test(String(e?.message))) throw e;
+                hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
+                continue;
+            }
+            setSyncBase(m.key, { rev: up.rev, sig: mine.sig });
             m.cloud = Date.now();
             await dbMarkCloud(m.id, m.cloud);
             setCloudRecord(m.key, { ts: m.cloud, count: m.count });
@@ -1953,9 +2040,560 @@ function wireDbxPanel() {
         updateIndicator();
     }));
 
+    $('cab_sync_auto').checked = !!d.syncAuto;
+    $('cab_sync_auto').addEventListener('change', e => {
+        d.syncAuto = e.target.checked;
+        saveSettings();
+        if (d.syncAuto) { sync.lastAt = 0; syncSoon(500); }
+    });
+    $('cab_sync_now').addEventListener('click', run($('cab_sync_now'), async () => {
+        const r = await syncNow();
+        if (r?.busy) toast.info('กำลังส่งขึ้น Dropbox อยู่ ลองอีกครั้งในอีกสักครู่', 'ซิงค์');
+    }));
+    $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
+
     renderDbxPanel();
+    renderSyncStatus();
     setInterval(() => cloudTick(), 30_000);
-    if (dbxConnected()) setTimeout(() => cloudTick(), 5000);
+    setInterval(() => syncSoon(0), 3 * 60_000);
+    if (dbxConnected()) {
+        setTimeout(() => cloudTick(), 5000);
+        syncSoon(6000);
+    }
+}
+
+// ---------------------------------------------------------------- two-way sync between ST servers
+//
+// Several SillyTavern servers (e.g. a hosted ST and TauriTavern) connected to the
+// same Dropbox app meet in the per-chat files above. For each chat this browser
+// remembers the Dropbox revision it last matched ("base": rev + message signature):
+//
+//   Dropbox rev == base rev            unchanged since; nothing to pull
+//   server == Dropbox                  in sync
+//   Dropbox only grew the server copy  the other side added messages/swipes → write it here
+//   server == base, Dropbox differs    only the other side changed it      → write it here
+//   server only grew the Dropbox copy  only this side changed it           → the upload sends it
+//   anything else                      changed on both sides               → the user picks
+//
+// Before a chat on the server is overwritten its current content is kept as a snapshot.
+// Comparisons use message content only (name, text, swipes, hidden flag), never the
+// chat header, so the same chat on two servers compares equal.
+
+const sync = { decisions: [], missing: [], notified: new Set(), lastAt: 0, applied: 0, error: '', progress: '', timer: null };
+const AUTO_KINDS = ['forward', 'changed', 'create'];
+
+function syncStoreKey() { return `cab_sync_base:${dbxSettings().appKey || ''}`; }
+function syncBases() {
+    try { return JSON.parse(localStorage.getItem(syncStoreKey()) || '{}') || {}; } catch { return {}; }
+}
+function syncBase(key) { return syncBases()[key] || null; }
+function setSyncBase(key, rec) {
+    try {
+        const all = syncBases();
+        if (rec) all[key] = rec; else delete all[key];
+        localStorage.setItem(syncStoreKey(), JSON.stringify(all));
+    } catch { /* storage unavailable: every sync just compares contents again */ }
+}
+
+/** Same layout as msgSig (so describeChanges can read it), but from content only. */
+function syncMsgKey(m) {
+    const sw = Array.isArray(m?.swipes) ? m.swipes.map(x => String(x ?? '')) : null;
+    const sid = sw ? Number(m?.swipe_id) || 0 : 0;
+    const body = JSON.stringify([String(m?.name ?? ''), !!m?.is_user, !!m?.is_system, String(m?.mes ?? ''), sw, sid]);
+    return `${hash(String(m?.mes ?? ''))}|${sw ? sw.length : 0}|${sid}|${hash(body)}`;
+}
+
+function parseJsonl(text) {
+    const out = [];
+    for (const line of String(text).split('\n')) {
+        if (!line.trim()) continue;
+        try { out.push(JSON.parse(line)); } catch { /* skip a broken line, as ST does */ }
+    }
+    return out;
+}
+
+const toJsonl = arr => arr.map(x => JSON.stringify(x)).join('\n');
+
+/** Snapshot hash of a JSONL text ('' when it can't be read), to recognise this browser's own uploads. */
+function jsonlHash(text) {
+    try { return deriveFromJsonl(text).hash; } catch { return ''; }
+}
+
+/** Header + messages of a chat, with content signatures. */
+function chatState(arr) {
+    const list = Array.isArray(arr) ? arr.filter(x => x && typeof x === 'object') : [];
+    const head = list.length && !('mes' in list[0]) ? list[0] : null;
+    const msgs = head ? list.slice(1) : list;
+    const keys = msgs.map(syncMsgKey);
+    return { head, msgs, keys, sig: hash(keys.join('\n')), count: msgs.length };
+}
+
+/** True when b is a continued from a: same messages, then more (b may also have more swipes on a's last). */
+function isAncestor(a, b) {
+    const n = a.count;
+    if (n > b.count) return false;
+    if (n === 0) return true;
+    for (let i = 0; i < n - 1; i++) if (a.keys[i] !== b.keys[i]) return false;
+    if (a.keys[n - 1] === b.keys[n - 1]) return true;
+    const x = a.msgs[n - 1], y = b.msgs[n - 1];
+    if (String(x?.name ?? '') !== String(y?.name ?? '') || !!x?.is_user !== !!y?.is_user) return false;
+    const swipesOf = m => (Array.isArray(m.swipes) && m.swipes.length ? m.swipes : [m.mes ?? '']).map(t => String(t ?? ''));
+    const xs = swipesOf(x), ys = swipesOf(y);
+    return xs.length <= ys.length && xs.every((t, i) => ys[i].startsWith(t));
+}
+
+/** The chat on this server that a Dropbox file belongs to. */
+function syncTargetOf(type, entity, chatId) {
+    const c = ctx();
+    entity = String(entity ?? '');
+    chatId = String(chatId ?? '');
+    // Dropbox may report a folder's name in different letter case (it ignores case).
+    const pick = (list, idOf) => {
+        const exact = list.find(x => idOf(x) === entity);
+        if (exact) return exact;
+        const loose = list.filter(x => idOf(x).toLowerCase() === entity.toLowerCase());
+        return loose.length === 1 ? loose[0] : undefined;
+    };
+    if (type === 'group') {
+        const group = pick(c.groups || [], g => String(g.id));
+        if (group) entity = String(group.id);
+        return { key: `g:${entity}:${chatId}`, type: 'group', chatId, groupId: entity, avatar: null, group, label: group?.name ?? `Group ${entity}`, missing: !group };
+    }
+    const ch = pick(c.characters || [], x => String(x.avatar));
+    if (ch) entity = ch.avatar;
+    return { key: `c:${entity}:${chatId}`, type: 'character', chatId, groupId: null, avatar: entity, ch, label: ch?.name ?? entity.replace(/\.png$/i, ''), missing: !ch };
+}
+
+/** The chat file as stored on this server ([] when it doesn't exist). */
+async function serverChat(t) {
+    const c = ctx();
+    const [url, body] = t.type === 'group'
+        ? ['/api/chats/group/get', { id: t.chatId, allow_not_found: true }]
+        : ['/api/chats/get', { ch_name: t.ch.name, file_name: t.chatId, avatar_url: t.avatar, allow_not_found: true }];
+    const res = await fetch(url, { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(`อ่านแชท "${t.label}" จากเซิร์ฟเวอร์ไม่สำเร็จ (${res.status})`);
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+}
+
+function uuid() {
+    if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, ch => {
+        const r = Math.random() * 16 | 0;
+        return (ch === 'x' ? r : (r & 3) | 8).toString(16);
+    });
+}
+
+/** Write `remote`'s messages into the server's chat file, keeping the server's own header details. */
+async function writeServerChat(t, remote, local) {
+    const c = ctx();
+    const old = local.head || {};
+    const src = remote.head || {};
+    // A fresh integrity slug makes any other tab still holding the old copy refuse to save over it.
+    const meta = { ...(src.chat_metadata ?? old.chat_metadata ?? {}), integrity: uuid() };
+    const head = t.type === 'group'
+        ? { ...old, ...src, user_name: 'unused', character_name: 'unused', chat_metadata: meta }
+        : {
+            user_name: c.name1, character_name: t.ch.name, create_date: fileStamp(Date.now()),
+            ...src, ...(old.create_date ? { create_date: old.create_date } : {}), chat_metadata: meta,
+        };
+    const chat = [head, ...remote.msgs];
+    const [url, body] = t.type === 'group'
+        ? ['/api/chats/group/save', { id: t.chatId, chat, force: true }]
+        : ['/api/chats/save', { ch_name: t.ch.name, file_name: t.chatId, chat, avatar_url: t.avatar, force: true }];
+    const res = await fetch(url, { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(`บันทึกแชท "${t.label}" ลงเซิร์ฟเวอร์ไม่สำเร็จ (${res.status})`);
+
+    // A group only lists the chats named in its own file.
+    if (t.type === 'group' && Array.isArray(t.group.chats) && !t.group.chats.includes(t.chatId)) {
+        t.group.chats.push(t.chatId);
+        const r = await fetch('/api/groups/edit', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify(t.group) });
+        if (!r.ok) throw new Error(`เพิ่มแชทเข้ากลุ่ม "${t.label}" ไม่สำเร็จ (${r.status})`);
+    }
+}
+
+/** Keep `text` as a snapshot of the chat (skipped when identical to one already kept). */
+async function addSnapshotText(t, text, { source, cloud: cloudTs = 0, ts = Date.now() } = {}) {
+    const d = deriveFromJsonl(text);
+    if (!d.count) return null;
+    const same = (await dbMetaByKey(t.key)).find(m => m.hash === d.hash);
+    if (same) {
+        if (cloudTs && !same.cloud) await dbMarkCloud(same.id, cloudTs);
+        return same.id;
+    }
+    const packed = await pack(text);
+    const meta = {
+        key: t.key, type: t.type, chatId: t.chatId, groupId: t.groupId, avatar: t.avatar, label: t.label,
+        ts, hash: d.hash, count: d.count, preview: d.preview, previewName: d.previewName, swipe: d.swipe,
+        rawSize: text.length, size: packed.enc === 'gzip' ? packed.data.size : text.length,
+        reason: 'sync', source, shrunk: false, mergedSwipes: 0, sv: SNAP_VERSION,
+    };
+    if (cloudTs) meta.cloud = cloudTs;
+    const id = await dbAdd(meta, packed, d.sigs);
+    await prune(t.key);
+    return id;
+}
+
+function isGenerating() {
+    const el = document.getElementById('mes_stop');
+    return !!el && getComputedStyle(el).display !== 'none';
+}
+
+/** Get the open chat's latest state onto the server before comparing it. */
+async function settleOpenChat(t) {
+    if (currentChatInfo()?.key !== t.key) return false;
+    if (isGenerating()) throw Object.assign(new Error('กำลังสร้างข้อความในแชทนี้อยู่ — รอให้เสร็จก่อน'), { busy: true });
+    await flush();
+    try { await ctx().saveChat?.(); } catch (e) { console.warn(LOG, e); }
+    return true;
+}
+
+/**
+ * Compare one Dropbox file with the server. Returns null when nothing needs doing,
+ * otherwise an item whose `kind` is one of
+ *   forward · changed · create   — safe to write here
+ *   conflict · shorter · gone · new — the user decides
+ */
+async function syncClassify(f, t) {
+    const base = syncBase(t.key);
+    if (base && base.rev === f.rev) return null;
+    await settleOpenChat(t);
+    const remoteText = await dbxDownloadText(`rev:${f.rev}`);
+    const remote = chatState(parseJsonl(remoteText));
+    if (!remote.count) return null;
+    // Same messages as when we last matched; only the header changed (e.g. the other side
+    // re-saved it after a sync). Anything new here is for the upload to send.
+    if (base && !base.skipped && base.sig === remote.sig) { setSyncBase(t.key, { rev: f.rev, sig: remote.sig }); return null; }
+    const local = chatState(await serverChat(t));
+    const item = {
+        t, rev: f.rev, path: f.path_lower, when: Date.parse(f.client_modified) || Date.parse(f.server_modified) || 0,
+        remote: { count: remote.count, sig: remote.sig, keys: remote.keys },
+        local: { count: local.count, sig: local.sig, keys: local.keys },
+    };
+    const agree = () => { setSyncBase(t.key, { rev: f.rev, sig: remote.sig }); return null; };
+
+    if (!local.count) {
+        if (base && !base.skipped) return { ...item, kind: 'gone' };
+        const since = Number(dbxSettings().syncSince) || 0;
+        return { ...item, kind: !base && since && (Date.parse(f.server_modified) || 0) >= since ? 'create' : 'new' };
+    }
+    if (local.sig === remote.sig) return agree();
+    // Unchanged here since we last matched: whatever Dropbox has now is the other side's
+    // doing — including deleted messages, which the prefix tests below can't tell apart.
+    if (base && !base.skipped && base.sig === local.sig) {
+        if (isAncestor(local, remote)) return { ...item, kind: 'forward' };
+        return { ...item, kind: local.count >= 6 && remote.count < local.count * 0.6 ? 'shorter' : 'changed' };
+    }
+    if (isAncestor(remote, local)) return agree(); // only this side moved on; the upload sends it
+    if (isAncestor(local, remote)) return { ...item, kind: 'forward' };
+    // Exactly what this browser once uploaded? Then the server copy grew out of it.
+    const rHash = jsonlHash(remoteText);
+    if (rHash && (await dbMetaByKey(t.key)).some(m => m.hash === rHash)) return agree();
+    return { ...item, kind: 'conflict' };
+}
+
+/** Write the Dropbox version into the server (the server's copy is kept as a snapshot first). */
+async function syncUseRemote(item, { asNewChat = false } = {}) {
+    const t = asNewChat ? { ...item.t, chatId: `${item.t.chatId} (Dropbox ${fileStamp(Date.now())})` } : item.t;
+    if (asNewChat) t.key = `${t.type === 'group' ? 'g' : 'c'}:${t.type === 'group' ? t.groupId : t.avatar}:${t.chatId}`;
+    const isOpen = asNewChat ? false : await settleOpenChat(t);
+    const remoteText = await dbxDownloadText(`rev:${item.rev}`);
+    const remote = chatState(parseJsonl(remoteText));
+    if (!remote.count) throw new Error('ไฟล์บน Dropbox ว่างเปล่า');
+    const localArr = asNewChat ? [] : await serverChat(t);
+    const local = chatState(localArr);
+    const now = Date.now();
+    if (local.count) await addSnapshotText(t, toJsonl(localArr), { source: 'before-sync', ts: now - 1 });
+    await writeServerChat(t, remote, local);
+    if (!asNewChat) {
+        if (remote.count < local.count) await ackShrink(t.key); // fewer messages on purpose, not a broken load
+        await addSnapshotText(t, remoteText, { source: 'dropbox', cloud: now, ts: now });
+        setSyncBase(t.key, { rev: item.rev, sig: remote.sig });
+        setCloudRecord(t.key, { ts: now, count: remote.count });
+        cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
+    }
+    if (isOpen && typeof ctx().reloadCurrentChat === 'function') await ctx().reloadCurrentChat();
+    return t;
+}
+
+/** Send the server's version to Dropbox (only if Dropbox is still at the revision the user looked at). */
+async function syncUseLocal(item) {
+    const t = item.t;
+    await settleOpenChat(t);
+    const arr = await serverChat(t);
+    const st = chatState(arr);
+    if (!st.count) throw new Error('แชทนี้ไม่มีในเซิร์ฟเวอร์แล้ว');
+    const text = toJsonl(arr);
+    let up;
+    try {
+        up = await dbxUpload(dbxPathOf(t), new Blob([text], { type: 'application/octet-stream' }), Date.now(), { update: item.rev });
+    } catch (e) {
+        if (/conflict/.test(String(e?.message))) throw new Error('ไฟล์บน Dropbox เพิ่งเปลี่ยนอีก — กดซิงค์อีกครั้งแล้วเลือกใหม่');
+        throw e;
+    }
+    const now = Date.now();
+    await addSnapshotText(t, text, { source: 'before-sync', cloud: now, ts: now });
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig });
+    setCloudRecord(t.key, { ts: now, count: st.count });
+    cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
+}
+
+async function syncKeepBoth(item) {
+    const copy = await syncUseRemote(item, { asNewChat: true });
+    await syncUseLocal(item);
+    return copy;
+}
+
+async function syncDeleteRemote(item) {
+    try { await dbxRpc('files/delete_v2', { path: item.path, parent_rev: item.rev }); } catch (e) {
+        if (/conflict|mismatch/.test(String(e?.message))) throw new Error('ไฟล์บน Dropbox เพิ่งเปลี่ยนอีก — กดซิงค์อีกครั้งแล้วเลือกใหม่');
+        throw e;
+    }
+    setSyncBase(item.t.key, null);
+}
+
+/** Leave this one alone until the Dropbox file changes again. */
+function syncSkip(item) {
+    setSyncBase(item.t.key, { rev: item.rev, sig: syncBase(item.t.key)?.sig ?? item.local.sig, skipped: true });
+}
+
+/** Run fn while no upload or other sync touches Dropbox. */
+async function withCloudLock(fn, { wait = true } = {}) {
+    for (let i = 0; cloud.running && wait && i < 240; i++) await new Promise(r => setTimeout(r, 250));
+    if (cloud.running) return { busy: true };
+    cloud.running = true;
+    try { return await fn(); } finally {
+        cloud.running = false;
+        renderDbxStatus();
+        updateIndicator();
+        if (cloud.again) { const a = cloud.again; cloud.again = null; setTimeout(() => cloudTick(a), 1000); }
+    }
+}
+
+/** Every chat file in Dropbox (or just the one for `only` = { type, avatar, groupId, chatId }). */
+async function listChatFiles(only) {
+    if (only) {
+        const path = dbxPathOf(only);
+        const meta = await dbxMetadata(path);
+        return meta ? [{ ...meta, path_display: meta.path_display || path, path_lower: meta.path_lower || path }] : [];
+    }
+    const files = [];
+    let page = await dbxRpc('files/list_folder', { path: '', recursive: true, limit: 2000 });
+    for (;;) {
+        for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl$/i.test(e.name)) files.push(e);
+        if (!page.has_more) break;
+        page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
+    }
+    return files;
+}
+
+/**
+ * Bring this server up to date with Dropbox: write what is safe, collect what needs a choice.
+ * auto: skip (don't wait) if Dropbox is busy.
+ */
+async function syncPull({ auto = false, only = null } = {}) {
+    if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
+    const d = dbxSettings();
+    if (!d.syncSince) { d.syncSince = Date.now(); saveSettings(); }
+    return await withCloudLock(async () => {
+        const out = { applied: [], decisions: [], missing: new Map(), errors: [] };
+        sync.error = '';
+        try {
+            const files = await listChatFiles(only);
+            for (let i = 0; i < files.length; i++) {
+                sync.progress = `กำลังตรวจ ${i + 1}/${files.length}…`;
+                renderSyncStatus();
+                const parts = String(files[i].path_display || '').split('/').filter(Boolean);
+                if (parts.length !== 3 || !['character', 'group'].includes(parts[0])) continue;
+                const t = syncTargetOf(parts[0], dbxUnseg(parts[1]), dbxUnseg(parts[2].replace(/\.jsonl$/i, '')));
+                if (t.missing) { out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1); continue; }
+                // Background runs don't download again what already waits for the user's choice.
+                const waiting = auto && sync.decisions.find(x => x.t.key === t.key && x.rev === files[i].rev);
+                if (waiting) { out.decisions.push({ ...waiting, t }); continue; }
+                try {
+                    const item = await syncClassify(files[i], t);
+                    if (!item) continue;
+                    if (AUTO_KINDS.includes(item.kind)) {
+                        await syncUseRemote(item);
+                        out.applied.push(item);
+                    } else {
+                        out.decisions.push(item);
+                    }
+                } catch (e) {
+                    if (e?.busy) continue; // the open chat is generating; next round
+                    console.warn(LOG, 'sync', t.key, e);
+                    out.errors.push(`${t.label}: ${e?.message ?? e}`);
+                    if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
+                }
+            }
+        } catch (e) {
+            out.errors.push(String(e?.message ?? e));
+        } finally {
+            sync.progress = '';
+        }
+        // Replace earlier decisions for the chats looked at; keep the rest.
+        const looked = only ? new Set([`${only.type === 'group' ? 'g' : 'c'}:${only.type === 'group' ? only.groupId : only.avatar}:${only.chatId}`]) : null;
+        sync.decisions = [
+            ...sync.decisions.filter(x => looked ? !looked.has(x.t.key) : false),
+            ...out.decisions,
+        ];
+        if (!only) sync.missing = [...out.missing.entries()];
+        sync.applied += out.applied.length;
+        sync.lastAt = Date.now();
+        sync.error = out.errors.join(' · ');
+        renderSyncStatus();
+        return out;
+    }, { wait: !auto });
+}
+
+function syncReport(r, { quiet = false } = {}) {
+    if (!r || r.busy) return;
+    if (r.applied.length) {
+        const names = [...new Set(r.applied.map(x => x.t.label))];
+        toast.ok(`อัปเดต ${r.applied.length} แชทจาก Dropbox: ${names.slice(0, 4).join(', ')}${names.length > 4 ? ' …' : ''}`, 'ซิงค์');
+    }
+    const fresh = sync.decisions.filter(x => !sync.notified.has(`${x.t.key}|${x.rev}`));
+    for (const x of sync.decisions) sync.notified.add(`${x.t.key}|${x.rev}`);
+    if (sync.decisions.length && (fresh.length || !quiet)) {
+        toast.warn(`มี ${sync.decisions.length} แชทที่ต้องเลือกว่าจะใช้ฉบับไหน — แตะที่นี่`, 'ซิงค์', {
+            timeOut: quiet ? 15_000 : 0, extendedTimeOut: 0, closeButton: true, onclick: () => showSyncDecisions(),
+        });
+    }
+    if (!quiet && !r.applied.length && !sync.decisions.length && !r.errors.length) toast.ok('ตรงกับ Dropbox แล้ว', 'ซิงค์');
+    if (r.errors.length && !quiet) toast.err(r.errors.slice(0, 3).join('<br>'), 'ซิงค์');
+}
+
+/** Manual sync from the panel or a dialog. */
+async function syncNow(opts = {}) {
+    await flush();
+    const r = await syncPull(opts);
+    syncReport(r);
+    if (sync.decisions.length && opts.only) showSyncDecisions();
+    return r;
+}
+
+function syncSoon(delay = 2000) {
+    if (!dbxConnected() || !dbxSettings().syncAuto) return;
+    clearTimeout(sync.timer);
+    sync.timer = setTimeout(async () => {
+        if (document.visibilityState === 'hidden' || Date.now() - sync.lastAt < 20_000) return;
+        try { syncReport(await syncPull({ auto: true }), { quiet: true }); } catch (e) { sync.error = String(e?.message ?? e); renderSyncStatus(); }
+    }, delay);
+}
+
+function renderSyncStatus() {
+    const el = document.getElementById('cab_sync_status');
+    const btn = document.getElementById('cab_sync_decide');
+    if (btn) {
+        btn.hidden = !sync.decisions.length;
+        btn.textContent = `เลือกฉบับ (${sync.decisions.length} แชท)`;
+    }
+    if (!el) return;
+    const parts = [];
+    if (sync.progress) parts.push(sync.progress);
+    else if (sync.lastAt) parts.push(`ซิงค์ล่าสุด ${fmtTime(sync.lastAt).slice(11, 16)}`);
+    else parts.push('ยังไม่ได้ซิงค์ในรอบนี้');
+    if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
+    if (sync.decisions.length) parts.push(`รอเลือก ${sync.decisions.length} แชท`);
+    if (sync.missing.length) {
+        const n = sync.missing.reduce((a, [, k]) => a + k, 0);
+        parts.push(`ข้าม ${n} แชทเพราะไม่มีตัวละคร/กลุ่มนี้ในเครื่องนี้ (${sync.missing.slice(0, 5).map(([l]) => l).join(', ')}${sync.missing.length > 5 ? ' …' : ''})`);
+    }
+    if (sync.error) parts.push(`⚠ ${sync.error}`);
+    el.textContent = parts.join(' · ');
+}
+
+const SYNC_KIND = {
+    conflict: { title: 'แก้ทั้งสองฝั่ง', why: 'แชทนี้มีการเปลี่ยนทั้งในเครื่องนี้และจากอีกเครื่อง หลังจากซิงค์กันครั้งล่าสุด' },
+    shorter: { title: 'ฉบับ Dropbox สั้นกว่ามาก', why: 'อีกเครื่องลบข้อความออกไปเยอะ — ถ้าไม่ได้ตั้งใจลบ ให้ใช้ฉบับในเครื่อง' },
+    gone: { title: 'แชทนี้ถูกลบในเครื่องนี้', why: 'เคยซิงค์แชทนี้แล้ว แต่ตอนนี้ไม่มีในเซิร์ฟเวอร์นี้ (ลบหรือเปลี่ยนชื่อ)' },
+    new: { title: 'มีบน Dropbox แต่ไม่มีในเครื่องนี้', why: 'แชทที่สร้างจากเครื่องอื่นก่อนเริ่มใช้การซิงค์ที่นี่ หรือเคยลบไปแล้ว' },
+};
+
+function showSyncDecisions() {
+    if (!sync.decisions.length) { toast.info('ไม่มีแชทที่ต้องเลือก', 'ซิงค์'); return; }
+    const { wrap } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>ซิงค์แชท — เลือกฉบับที่จะใช้</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list" id="cab_sync_list"></div>
+            <div class="cab_foot" id="cab_sync_foot"></div>
+        </div>`);
+    let busy = false;
+    const act = (btn, fn) => async () => {
+        if (busy) return;
+        busy = true;
+        wrap.querySelectorAll('.menu_button').forEach(b => b.classList.add('disabled'));
+        try { await withCloudLock(fn); } catch (e) { console.error(LOG, e); toast.err(String(e?.message ?? e), 'ซิงค์'); }
+        busy = false;
+        renderSyncStatus();
+        if (document.getElementById('cab_modal') !== wrap) return;
+        if (!sync.decisions.length) { wrap._cabClose(); toast.ok('เรียบร้อย', 'ซิงค์'); return; }
+        render();
+    };
+    const done = item => { sync.decisions = sync.decisions.filter(x => x !== item); };
+
+    function render() {
+        const items = sync.decisions;
+        wrap.querySelector('#cab_sync_list').innerHTML = items.map((x, i) => {
+            const k = SYNC_KIND[x.kind] ?? SYNC_KIND.conflict;
+            const diff = x.local.count && x.kind !== 'gone'
+                ? describeChanges({ head: '', msgs: x.local.keys }, { head: '', msgs: x.remote.keys }).join(' · ') : '';
+            const btns = x.kind === 'new' ? [['remote', 'สร้างแชทนี้', true], ['skip', 'ข้าม']]
+                : x.kind === 'gone' ? [['remote', 'สร้างกลับมา'], ['delete', 'ลบออกจาก Dropbox ด้วย'], ['skip', 'ข้าม', true]]
+                : [['remote', 'ใช้ฉบับ Dropbox', x.kind === 'conflict'], ['local', 'ใช้ฉบับในเครื่อง', x.kind === 'shorter'], ['both', 'เก็บทั้งคู่']];
+            return `
+            <section class="cab_problem">
+                <h4>${escapeHtml(x.t.label)} — ${escapeHtml(x.t.chatId)}</h4>
+                <p><b>${escapeHtml(k.title)}</b> · ${escapeHtml(k.why)}</p>
+                <p>ในเครื่อง ${x.local.count ? `${x.local.count} ข้อความ` : 'ไม่มี'} · Dropbox ${x.remote.count} ข้อความ${x.when ? ` (ส่งขึ้นเมื่อ ${fmtTime(x.when)})` : ''}</p>
+                ${diff ? `<p class="cab_changes" title="ฉบับ Dropbox เทียบกับฉบับในเครื่อง">ฉบับ Dropbox: ${escapeHtml(diff)}</p>` : ''}
+                <div class="cab_buttons">${btns.map(([a, label, primary]) =>
+                    `<div class="menu_button${primary ? ' cab_primary' : ''}" data-i="${i}" data-a="${a}">${escapeHtml(label)}</div>`).join('')}</div>
+            </section>`;
+        }).join('');
+        const nNew = items.filter(x => x.kind === 'new').length;
+        wrap.querySelector('#cab_sync_foot').innerHTML = `<small>ก่อนเขียนทับแชทในเครื่อง ระบบเก็บฉบับเดิมไว้ในรายการ backup (ป้าย "ก่อนซิงค์") · "เก็บทั้งคู่" สร้างฉบับ Dropbox เป็นไฟล์แชทใหม่</small>`
+            + (nNew > 1 ? `<div class="cab_buttons"><div class="menu_button" data-bulk="create">สร้างทั้งหมด (${nNew})</div><div class="menu_button" data-bulk="skip">ข้ามทั้งหมด (${nNew})</div></div>` : '');
+
+        wrap.querySelectorAll('[data-a]').forEach(btn => {
+            const item = items[Number(btn.dataset.i)];
+            btn.addEventListener('click', act(btn, async () => {
+                const a = btn.dataset.a;
+                if (a === 'remote') {
+                    if (item.local.count && !confirm(`เขียนฉบับ Dropbox (${item.remote.count} ข้อความ) ทับแชท "${item.t.chatId}" ในเครื่องนี้ (${item.local.count} ข้อความ)?\nฉบับในเครื่องจะเก็บไว้ในรายการ backup`)) return;
+                    await syncUseRemote(item);
+                } else if (a === 'local') {
+                    if (!confirm(`ส่งฉบับในเครื่อง (${item.local.count} ข้อความ) ทับไฟล์บน Dropbox?\nเครื่องอื่นจะได้ฉบับนี้ตอนซิงค์ครั้งถัดไป (Dropbox เก็บเวอร์ชันเดิมไว้ประมาณ 30 วัน)`)) return;
+                    await syncUseLocal(item);
+                } else if (a === 'both') {
+                    const copy = await syncKeepBoth(item);
+                    toast.ok(`บันทึกฉบับ Dropbox เป็นแชท "${copy.chatId}"`, 'ซิงค์');
+                } else if (a === 'delete') {
+                    if (!confirm(`ลบไฟล์แชท "${item.t.chatId}" ออกจาก Dropbox?\nเครื่องอื่นที่มีแชทนี้อยู่แล้วจะไม่ถูกลบ`)) return;
+                    await syncDeleteRemote(item);
+                } else {
+                    syncSkip(item);
+                }
+                done(item);
+            }));
+        });
+        wrap.querySelectorAll('[data-bulk]').forEach(btn => {
+            btn.addEventListener('click', act(btn, async () => {
+                const list = sync.decisions.filter(x => x.kind === 'new');
+                if (btn.dataset.bulk === 'skip') { list.forEach(x => { syncSkip(x); done(x); }); return; }
+                if (!confirm(`สร้าง ${list.length} แชทจาก Dropbox ในเครื่องนี้?`)) return;
+                for (let i = 0; i < list.length; i++) {
+                    btn.textContent = `กำลังสร้าง ${i + 1}/${list.length}…`;
+                    await syncUseRemote(list[i]);
+                    done(list[i]);
+                }
+            }));
+        });
+    }
+    render();
 }
 
 // ---------------------------------------------------------------- leftovers from Pocky chat vault
@@ -2185,6 +2823,6 @@ async function init() {
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION };
 
 if (typeof jQuery === 'function') jQuery(init); else init();
