@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '1.8.0'; // keep in sync with manifest.json
+const VERSION = '1.8.1'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1374,7 +1374,7 @@ function renderSettings() {
                         </select>
                     </div>
                     <div class="cab_grid">
-                        <label for="cab_dbx_interval">ส่งแต่ละแชทไม่ถี่กว่าทุก (นาที)</label>
+                        <label for="cab_dbx_interval" title="ถ้าเปิดซิงค์ระหว่างเครื่องไว้ จะส่งทันทีหลังแชทเปลี่ยนเสมอ ไม่ใช้ค่านี้">ส่งแต่ละแชทไม่ถี่กว่าทุก (นาที)</label>
                         <input type="number" id="cab_dbx_interval" class="text_pole" min="1" max="120" step="1">
                     </div>
                     <div class="cab_buttons">
@@ -1385,7 +1385,7 @@ function renderSettings() {
                     <hr class="sysHR">
                     <b>ซิงค์แชทระหว่างเครื่อง</b>
                     <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
-                    <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้)"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
+                    <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
                     <small id="cab_sync_status" class="cab_note"></small>
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
@@ -1531,6 +1531,15 @@ function wireEvents() {
     // Best effort on tab close: nothing async is guaranteed here, but a pending
     // write that's already in-flight usually completes.
     window.addEventListener('pagehide', () => flush());
+    // Syncing between devices: closing the tab before the latest change reached Dropbox
+    // would leave the other device behind, so let the browser ask first (desktop only —
+    // mobile browsers never show this prompt, but still get the upload started here).
+    window.addEventListener('beforeunload', e => {
+        if (!dbxConnected() || !dbxSettings().syncAuto || !cloudUnsent()) return;
+        flush().then(() => cloudTick({ fast: true })).catch(() => { /* next tick */ });
+        e.preventDefault();
+        e.returnValue = '';
+    });
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') { checkForNewVersion(); syncSoon(); }
         if (document.visibilityState !== 'hidden') return;
@@ -1714,11 +1723,16 @@ async function dbxDownloadText(path) {
 }
 
 /** Upload chats whose newest snapshot isn't in Dropbox yet. */
-async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } = {}) {
+/**
+ * ignoreGap: send now, even with automatic upload off (a manual "send").
+ * fast: skip only the per-chat pacing — used while syncing between devices, so the
+ * other side never waits on a chat this one already has.
+ */
+async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, fast = false } = {}) {
     const d = dbxSettings();
     if (!dbxConnected()) return;
     if (!force && !ignoreGap && d.auto === false) return;
-    if (cloud.running) { cloud.again = { ignoreGap: ignoreGap || cloud.again?.ignoreGap }; return; }
+    if (cloud.running) { cloud.again = { ignoreGap: ignoreGap || cloud.again?.ignoreGap, fast: fast || cloud.again?.fast }; return; }
     if (!force && Date.now() < cloud.backoffUntil) return;
     cloud.running = true;
     cloud.error = '';
@@ -1733,7 +1747,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } 
             if (m.cloud) continue;
             const forced = force && (!forceKeys || forceKeys.includes(key));
             if (m.shrunk && !forced) { withheld.push({ key, label: m.label, why: 'แชทสั้นลงผิดปกติ' }); continue; }
-            if (!ignoreGap && Date.now() - (cloud.lastAt.get(key) || 0) < gap) continue;
+            if (!ignoreGap && !fast && Date.now() - (cloud.lastAt.get(key) || 0) < gap) continue;
             due.push({ m, forced });
         }
         cloud.pending = due.length;
@@ -1836,8 +1850,14 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null } 
 /** After a snapshot is written: sync shortly (pacing still applies). */
 function cloudSoon() {
     if (!dbxConnected()) return;
+    const fast = !!dbxSettings().syncAuto;
     clearTimeout(cloud.soonTimer);
-    cloud.soonTimer = setTimeout(() => cloudTick(), 3000);
+    cloud.soonTimer = setTimeout(() => { cloud.soonTimer = null; cloudTick({ fast }); }, fast ? 1500 : 3000);
+}
+
+/** A change on this device that hasn't reached Dropbox yet (and isn't held back on purpose). */
+function cloudUnsent() {
+    return !!(pending || inflightByKey.size || cloud.soonTimer || (cloud.pending > 0 && (cloud.running || cloud.error)));
 }
 
 /** Download every chat file from Dropbox into local snapshots. */
