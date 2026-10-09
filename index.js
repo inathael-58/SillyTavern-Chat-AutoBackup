@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '1.8.2'; // keep in sync with manifest.json
+const VERSION = '1.9.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -37,7 +37,8 @@ const DEFAULTS = Object.freeze({
     // Off-device copy of each chat's newest snapshot in the user's own Dropbox (App folder).
     // syncAuto: write chats that are newer in Dropbox (from another device or ST server) back into this server.
     // syncSince: when sync was first used on this server — older Dropbox-only chats are offered, not created.
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0 }), // indicatorStyle: 'full' | 'short' | 'off'
+    // syncDeletes: once sync is in use, deleting a chat here also removes it from Dropbox and the other devices.
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true }), // indicatorStyle: 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -854,7 +855,9 @@ async function renderBrowser() {
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
                         ${m.cloud && m.source !== 'dropbox' ? `<span class="cab_tag cab_db_tag" title="ส่งขึ้น Dropbox แล้วเมื่อ ${fmtTime(m.cloud)}">Dropbox</span>` : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
-                        ${m.reason === 'sync' ? (m.source === 'before-sync'
+                        ${m.reason === 'sync' ? (m.source === 'before-delete'
+                            ? '<span class="cab_tag" title="ฉบับในเครื่องก่อนถูกลบตามอีกเครื่อง">ก่อนลบ</span>'
+                            : m.source === 'before-sync'
                             ? '<span class="cab_tag" title="ฉบับในเครื่องก่อนถูกเขียนทับด้วยฉบับจาก Dropbox ตอนซิงค์">ก่อนซิงค์</span>'
                             : '<span class="cab_tag" title="ฉบับที่ซิงค์มาจาก Dropbox แล้วเขียนลงเซิร์ฟเวอร์นี้">ซิงค์จาก Dropbox</span>') : ''}
                         ${m.reason === 'import' ? `<span class="cab_tag">${m.source === 'pocky' ? 'จาก Pocky' : m.source === 'dropbox' ? 'จาก Dropbox' : 'import'}</span>` : ''}
@@ -1388,6 +1391,7 @@ function renderSettings() {
                     <b>ซิงค์แชทระหว่างเครื่อง</b>
                     <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
                     <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
+                    <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแชทแล้วลบใน Dropbox และเครื่องอื่นด้วย</label>
                     <small id="cab_sync_status" class="cab_note"></small>
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
@@ -1516,6 +1520,8 @@ function wireEvents() {
         E.MESSAGE_SWIPED, E.MESSAGE_UPDATED, E.GENERATION_ENDED,
     ].filter(Boolean);
     for (const ev of [...new Set(changeEvents)]) eventSource.on(ev, () => schedule());
+    if (E.CHAT_DELETED) eventSource.on(E.CHAT_DELETED, name => { onChatDeleted('character', name); });
+    if (E.GROUP_CHAT_DELETED) eventSource.on(E.GROUP_CHAT_DELETED, name => { onChatDeleted('group', name); });
 
     if (E.CHAT_CHANGED) {
         eventSource.on(E.CHAT_CHANGED, async () => {
@@ -1646,6 +1652,10 @@ function dbxUnseg(t) {
 function dbxPathOf(m) {
     const entity = m.type === 'group' ? m.groupId : m.avatar;
     return `/${m.type === 'group' ? 'group' : 'character'}/${dbxSeg(entity)}/${dbxSeg(m.chatId)}.jsonl`;
+}
+/** Marker left when a chat is deleted, so the other devices delete it too: /deleted/<type>/<entity>/<chat>.json */
+function dbxTombPathOf(m) {
+    return `/deleted${dbxPathOf(m).replace(/\.jsonl$/, '.json')}`;
 }
 
 function b64url(bytes) {
@@ -1787,7 +1797,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                 };
                 if (remote) {
                     const known = syncBase(m.key);
-                    const base = known?.skipped ? null : known; // "skip" in the sync dialog is no agreement
+                    const base = known?.skipped || known?.deleted ? null : known; // "skip" in the sync dialog is no agreement
                     // Same messages as Dropbox already has (only the chat header differs, e.g.
                     // right after a sync rewrote this chat): nothing worth sending.
                     if (base && base.rev === remote.rev && base.sig === mine.sig && base.meta !== undefined && metaEq(base.meta, mine.meta)) { await markSent(); continue; }
@@ -1832,6 +1842,12 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                     }
                     mode = { update: remote.rev };
                 } else {
+                    // Not in Dropbox: deleted on another device? Then don't bring it back.
+                    if (await dbxMetadata(dbxTombPathOf(m))) {
+                        if (syncBase(m.key)?.deleted) { await markSent(); continue; }
+                        hold('แชทนี้ถูกลบที่อีกเครื่องแล้ว — กดซิงค์เพื่อเลือกว่าจะลบหรือเก็บไว้', 'diverged');
+                        continue;
+                    }
                     mode = 'add';
                 }
             }
@@ -2090,6 +2106,8 @@ function wireDbxPanel() {
         if (r?.busy) toast.info('กำลังส่งขึ้น Dropbox อยู่ ลองอีกครั้งในอีกสักครู่', 'ซิงค์');
     }));
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
+    $('cab_sync_deletes').checked = d.syncDeletes !== false;
+    $('cab_sync_deletes').addEventListener('change', e => { d.syncDeletes = e.target.checked; saveSettings(); });
 
     renderDbxPanel();
     renderSyncStatus();
@@ -2119,7 +2137,7 @@ function wireDbxPanel() {
 // chat header, so the same chat on two servers compares equal.
 
 const sync = { decisions: [], missing: [], notified: new Set(), lastAt: 0, applied: 0, error: '', progress: '', timer: null };
-const AUTO_KINDS = ['forward', 'changed', 'create', 'meta'];
+const AUTO_KINDS = ['forward', 'changed', 'create', 'meta', 'remove'];
 
 function syncStoreKey() { return `cab_sync_base:${dbxSettings().appKey || ''}`; }
 function syncBases() {
@@ -2313,7 +2331,8 @@ async function settleOpenChat(t) {
  *   conflict · shorter · gone · new — the user decides
  */
 async function syncClassify(f, t) {
-    const base = syncBase(t.key);
+    const known = syncBase(t.key);
+    const base = known?.deleted ? null : known; // deleted here before, now back in Dropbox: a new chat
     if (base && base.rev === f.rev) return null;
     await settleOpenChat(t);
     const remoteText = await dbxDownloadText(`rev:${f.rev}`);
@@ -2356,6 +2375,24 @@ async function syncClassify(f, t) {
     const rHash = jsonlHash(remoteText);
     if (rHash && (await dbMetaByKey(t.key)).some(m => m.hash === rHash)) return agree();
     return { ...item, kind: 'conflict' };
+}
+
+/** A deletion marker from another device: delete here if untouched since the last sync, otherwise ask. */
+async function syncClassifyDeleted(f, t) {
+    const base = syncBase(t.key);
+    if (base?.deleted && base.rev === f.rev) return null;
+    const done = () => { setSyncBase(t.key, { deleted: true, rev: f.rev }); return null; };
+    if (t.missing) return done();
+    const local = chatState(await serverChat(t));
+    if (!local.count) return done();
+    const untouched = base && !base.deleted && !base.skipped && base.sig === local.sig && metaEq(base.meta, local.meta);
+    const isOpen = currentChatInfo()?.key === t.key;
+    return {
+        t, rev: f.rev, path: f.path_lower, when: Date.parse(f.server_modified) || 0,
+        remote: { count: 0, sig: '', keys: [], meta: null },
+        local: { count: local.count, sig: local.sig, keys: local.keys, meta: local.meta },
+        kind: untouched && !isOpen ? 'remove' : 'deleted',
+    };
 }
 
 /** Write the Dropbox version into the server (the server's copy is kept as a snapshot first). */
@@ -2422,12 +2459,92 @@ async function syncKeepBoth(item) {
     return copy;
 }
 
-async function syncDeleteRemote(item) {
-    try { await dbxRpc('files/delete_v2', { path: item.path, parent_rev: item.rev }); } catch (e) {
-        if (/conflict|mismatch/.test(String(e?.message))) throw new Error('ไฟล์บน Dropbox เพิ่งเปลี่ยนอีก — กดซิงค์อีกครั้งแล้วเลือกใหม่');
+/** Every snapshot of this chat counts as sent, so nothing tries to upload it again. */
+async function markKeySent(key) {
+    const now = Date.now();
+    for (const m of await dbMetaByKey(key)) if (!m.cloud) await dbMarkCloud(m.id, now);
+}
+
+/**
+ * Delete a chat from Dropbox and leave a marker so the other devices delete it too
+ * (Dropbox keeps deleted files ~30 days; this device keeps its snapshots).
+ */
+async function syncDeleteEverywhere(t) {
+    const marker = new Blob([JSON.stringify({ deleted: new Date().toISOString(), chat: t.chatId })], { type: 'application/octet-stream' });
+    const up = await dbxUpload(dbxTombPathOf(t), marker, Date.now(), 'overwrite');
+    try { await dbxRpc('files/delete_v2', { path: dbxPathOf(t) }); } catch (e) {
+        if (!/not_found/.test(String(e?.message))) throw e;
+    }
+    setSyncBase(t.key, { deleted: true, rev: up.rev });
+    await markKeySent(t.key);
+    cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
+}
+
+/** Delete the chat on this server because another device deleted it (its content is kept as a snapshot). */
+async function syncDeleteLocal(item) {
+    const t = item.t;
+    if (currentChatInfo()?.key === t.key) throw new Error(`แชท "${t.chatId}" เปิดอยู่ — เปิดแชทอื่นก่อนแล้วค่อยลบ`);
+    const c = ctx();
+    const arr = await serverChat(t);
+    if (arr.length) await addSnapshotText(t, toJsonl(arr), { source: 'before-delete', cloud: Date.now() });
+    const [url, body] = t.type === 'group'
+        ? ['/api/chats/group/delete', { id: t.chatId }]
+        : ['/api/chats/delete', { chatfile: `${t.chatId}.jsonl`, avatar_url: t.avatar }];
+    const res = await fetch(url, { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify(body) });
+    if (!res.ok && chatState(await serverChat(t)).count) throw new Error(`ลบแชท "${t.chatId}" ไม่สำเร็จ (${res.status})`);
+    if (t.type === 'group' && Array.isArray(t.group.chats) && t.group.chats.includes(t.chatId)) {
+        t.group.chats = t.group.chats.filter(x => x !== t.chatId);
+        if (t.group.chat_id === t.chatId && t.group.chats.length) t.group.chat_id = t.group.chats[t.group.chats.length - 1];
+        await fetch('/api/groups/edit', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify(t.group) });
+    }
+    setSyncBase(t.key, { deleted: true, rev: item.rev });
+    await markKeySent(t.key);
+}
+
+/** Deleted elsewhere, but keep it: put it back in Dropbox and drop the marker. */
+async function syncKeepDeleted(item) {
+    const t = item.t;
+    await settleOpenChat(t);
+    const arr = await serverChat(t);
+    const st = chatState(arr);
+    if (!st.count) throw new Error('แชทนี้ไม่มีในเซิร์ฟเวอร์แล้ว');
+    let up;
+    try {
+        up = await dbxUpload(dbxPathOf(t), new Blob([toJsonl(arr)], { type: 'application/octet-stream' }), Date.now(), 'add');
+    } catch (e) {
+        if (/conflict/.test(String(e?.message))) throw new Error('มีแชทนี้กลับมาใน Dropbox แล้ว — กดซิงค์อีกครั้ง');
         throw e;
     }
-    setSyncBase(item.t.key, null);
+    try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(t) }); } catch { /* already gone */ }
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+    await markKeySent(t.key);
+    cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
+}
+
+/** A chat was deleted in ST here: remove it from Dropbox and the other devices too (once sync is in use). */
+async function onChatDeleted(type, name) {
+    const d = dbxSettings();
+    if (!dbxConnected() || !d.syncSince || d.syncDeletes === false) return;
+    const chatId = String(name ?? '').replace(/\.jsonl$/i, '');
+    if (!chatId) return;
+    // The event names only the file; find which character's or group's chat it was.
+    const prefix = type === 'group' ? 'g:' : 'c:';
+    const keys = new Set(Object.keys(syncBases()).filter(k => k.startsWith(prefix) && k.endsWith(`:${chatId}`)));
+    try { for (const m of await dbAllMeta()) if (m.type === type && m.chatId === chatId) keys.add(m.key); } catch { /* ignore */ }
+    for (const key of keys) {
+        if (syncBase(key)?.deleted) continue;
+        const entity = key.slice(2, key.length - chatId.length - 1);
+        const t = syncTargetOf(type, entity, chatId);
+        try {
+            if (!t.missing && chatState(await serverChat(t)).count) continue; // still here: not this one
+            const r = await withCloudLock(() => syncDeleteEverywhere(t));
+            if (r?.busy) throw new Error('Dropbox ไม่ว่าง');
+            toast.info(`ลบ "${chatId}" ออกจาก Dropbox แล้ว — เครื่องอื่นจะลบตามตอนซิงค์`, 'ซิงค์');
+        } catch (e) {
+            console.warn(LOG, 'delete sync', key, e);
+            toast.warn(`ลบ "${chatId}" ออกจาก Dropbox ไม่สำเร็จ: ${e?.message ?? e}`, 'ซิงค์');
+        }
+    }
 }
 
 /** Leave this one alone until the Dropbox file changes again. */
@@ -2451,14 +2568,16 @@ async function withCloudLock(fn, { wait = true } = {}) {
 /** Every chat file in Dropbox (or just the one for `only` = { type, avatar, groupId, chatId }). */
 async function listChatFiles(only) {
     if (only) {
-        const path = dbxPathOf(only);
-        const meta = await dbxMetadata(path);
-        return meta ? [{ ...meta, path_display: meta.path_display || path, path_lower: meta.path_lower || path }] : [];
+        for (const path of [dbxPathOf(only), dbxTombPathOf(only)]) {
+            const meta = await dbxMetadata(path);
+            if (meta) return [{ ...meta, path_display: meta.path_display || path, path_lower: meta.path_lower || path }];
+        }
+        return [];
     }
     const files = [];
     let page = await dbxRpc('files/list_folder', { path: '', recursive: true, limit: 2000 });
     for (;;) {
-        for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl$/i.test(e.name)) files.push(e);
+        for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl?$/i.test(e.name)) files.push(e);
         if (!page.has_more) break;
         page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
     }
@@ -2478,21 +2597,32 @@ async function syncPull({ auto = false, only = null } = {}) {
         sync.error = '';
         try {
             const files = await listChatFiles(only);
+            // /character|group/<entity>/<chat>.jsonl, or a deletion marker /deleted/…/<chat>.json
+            const parse = f => {
+                const parts = String(f.path_display || '').split('/').filter(Boolean);
+                const tomb = parts[0] === 'deleted';
+                if (tomb) parts.shift();
+                if (parts.length !== 3 || !['character', 'group'].includes(parts[0])) return null;
+                if (!(tomb ? /\.json$/i : /\.jsonl$/i).test(parts[2])) return null;
+                return { tomb, t: syncTargetOf(parts[0], dbxUnseg(parts[1]), dbxUnseg(parts[2].replace(/\.jsonl?$/i, ''))) };
+            };
+            const parsed = files.map(parse);
+            const inDropbox = new Set(parsed.filter(p => p && !p.tomb).map(p => p.t.key));
             for (let i = 0; i < files.length; i++) {
                 sync.progress = `กำลังตรวจ ${i + 1}/${files.length}…`;
                 renderSyncStatus();
-                const parts = String(files[i].path_display || '').split('/').filter(Boolean);
-                if (parts.length !== 3 || !['character', 'group'].includes(parts[0])) continue;
-                const t = syncTargetOf(parts[0], dbxUnseg(parts[1]), dbxUnseg(parts[2].replace(/\.jsonl$/i, '')));
-                if (t.missing) { out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1); continue; }
+                if (!parsed[i]) continue;
+                const { tomb, t } = parsed[i];
+                if (tomb && inDropbox.has(t.key)) continue; // the chat came back since: it wins
+                if (!tomb && t.missing) { out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1); continue; }
                 // Background runs don't download again what already waits for the user's choice.
                 const waiting = auto && sync.decisions.find(x => x.t.key === t.key && x.rev === files[i].rev);
                 if (waiting) { out.decisions.push({ ...waiting, t }); continue; }
                 try {
-                    const item = await syncClassify(files[i], t);
+                    const item = tomb ? await syncClassifyDeleted(files[i], t) : await syncClassify(files[i], t);
                     if (!item) continue;
                     if (AUTO_KINDS.includes(item.kind)) {
-                        await syncUseRemote(item);
+                        await (item.kind === 'remove' ? syncDeleteLocal(item) : syncUseRemote(item));
                         out.applied.push(item);
                     } else {
                         out.decisions.push(item);
@@ -2526,10 +2656,10 @@ async function syncPull({ auto = false, only = null } = {}) {
 
 function syncReport(r, { quiet = false } = {}) {
     if (!r || r.busy) return;
-    if (r.applied.length) {
-        const names = [...new Set(r.applied.map(x => x.t.label))];
-        toast.ok(`อัปเดต ${r.applied.length} แชทจาก Dropbox: ${names.slice(0, 4).join(', ')}${names.length > 4 ? ' …' : ''}`, 'ซิงค์');
-    }
+    const names = list => { const n = [...new Set(list.map(x => x.t.label))]; return `${n.slice(0, 4).join(', ')}${n.length > 4 ? ' …' : ''}`; };
+    const updated = r.applied.filter(x => x.kind !== 'remove'), removed = r.applied.filter(x => x.kind === 'remove');
+    if (updated.length) toast.ok(`อัปเดต ${updated.length} แชทจาก Dropbox: ${names(updated)}`, 'ซิงค์');
+    if (removed.length) toast.info(`ลบ ${removed.length} แชทที่ถูกลบจากอีกเครื่อง: ${names(removed)} (ยังกู้ได้จากรายการ backup)`, 'ซิงค์');
     const fresh = sync.decisions.filter(x => !sync.notified.has(`${x.t.key}|${x.rev}`));
     for (const x of sync.decisions) sync.notified.add(`${x.t.key}|${x.rev}`);
     if (sync.decisions.length && (fresh.length || !quiet)) {
@@ -2586,6 +2716,7 @@ const SYNC_KIND = {
     shorter: { title: 'ฉบับ Dropbox สั้นกว่ามาก', why: 'อีกเครื่องลบข้อความออกไปเยอะ — ถ้าไม่ได้ตั้งใจลบ ให้ใช้ฉบับในเครื่อง' },
     gone: { title: 'แชทนี้ถูกลบในเครื่องนี้', why: 'เคยซิงค์แชทนี้แล้ว แต่ตอนนี้ไม่มีในเซิร์ฟเวอร์นี้ (ลบหรือเปลี่ยนชื่อ)' },
     new: { title: 'มีบน Dropbox แต่ไม่มีในเครื่องนี้', why: 'แชทที่สร้างจากเครื่องอื่นก่อนเริ่มใช้การซิงค์ที่นี่ หรือเคยลบไปแล้ว' },
+    deleted: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบแชทนี้แล้ว แต่ที่นี่มีการแก้หลังซิงค์ครั้งล่าสุด หรือเปิดแชทนี้อยู่' },
 };
 
 function showSyncDecisions() {
@@ -2617,24 +2748,31 @@ function showSyncDecisions() {
         const items = sync.decisions;
         wrap.querySelector('#cab_sync_list').innerHTML = items.map((x, i) => {
             const k = SYNC_KIND[x.kind] ?? SYNC_KIND.conflict;
-            const diff = x.local.count && x.kind !== 'gone'
+            const diff = x.local.count && !['gone', 'deleted'].includes(x.kind)
                 ? describeChanges({ head: '', msgs: x.local.keys }, { head: '', msgs: x.remote.keys }).join(' · ') : '';
-            const btns = x.kind === 'new' ? [['remote', 'สร้างแชทนี้', true], ['skip', 'ข้าม']]
-                : x.kind === 'gone' ? [['remote', 'สร้างกลับมา'], ['delete', 'ลบออกจาก Dropbox ด้วย'], ['skip', 'ข้าม', true]]
+            const btns = x.kind === 'new' ? [['remote', 'สร้างแชทนี้', true], ['purge', 'ลบทุกเครื่อง'], ['skip', 'ข้าม']]
+                : x.kind === 'gone' ? [['purge', 'ลบทุกเครื่อง', true], ['remote', 'สร้างกลับมา'], ['skip', 'ข้าม']]
+                : x.kind === 'deleted' ? [['dellocal', 'ลบในเครื่องนี้ด้วย', true], ['keep', 'เก็บไว้ (ส่งกลับขึ้น Dropbox)']]
                 : [['remote', 'ใช้ฉบับ Dropbox', x.kind === 'conflict'], ['local', 'ใช้ฉบับในเครื่อง', x.kind === 'shorter'], ['both', 'เก็บทั้งคู่']];
             return `
             <section class="cab_problem">
                 <h4>${escapeHtml(x.t.label)} — ${escapeHtml(x.t.chatId)}</h4>
                 <p><b>${escapeHtml(k.title)}</b> · ${escapeHtml(k.why)}</p>
-                <p>ในเครื่อง ${x.local.count ? `${x.local.count} ข้อความ` : 'ไม่มี'} · Dropbox ${x.remote.count} ข้อความ${x.when ? ` (ส่งขึ้นเมื่อ ${fmtTime(x.when)})` : ''}</p>
+                <p>ในเครื่อง ${x.local.count ? `${x.local.count} ข้อความ` : 'ไม่มี'} · ${x.kind === 'deleted' ? `ลบที่อีกเครื่องเมื่อ ${x.when ? fmtTime(x.when) : '?'}` : `Dropbox ${x.remote.count} ข้อความ${x.when ? ` (ส่งขึ้นเมื่อ ${fmtTime(x.when)})` : ''}`}</p>
                 ${diff ? `<p class="cab_changes" title="ฉบับ Dropbox เทียบกับฉบับในเครื่อง">ฉบับ Dropbox: ${escapeHtml(diff)}</p>` : ''}
                 <div class="cab_buttons">${btns.map(([a, label, primary]) =>
                     `<div class="menu_button${primary ? ' cab_primary' : ''}" data-i="${i}" data-a="${a}">${escapeHtml(label)}</div>`).join('')}</div>
             </section>`;
         }).join('');
         const nNew = items.filter(x => x.kind === 'new').length;
-        wrap.querySelector('#cab_sync_foot').innerHTML = `<small>ก่อนเขียนทับแชทในเครื่อง ระบบเก็บฉบับเดิมไว้ในรายการ backup (ป้าย "ก่อนซิงค์") · "เก็บทั้งคู่" สร้างฉบับ Dropbox เป็นไฟล์แชทใหม่</small>`
-            + (nNew > 1 ? `<div class="cab_buttons"><div class="menu_button" data-bulk="create">สร้างทั้งหมด (${nNew})</div><div class="menu_button" data-bulk="skip">ข้ามทั้งหมด (${nNew})</div></div>` : '');
+        const nGone = items.filter(x => x.kind === 'gone').length;
+        const bulk = [
+            nNew > 1 && `<div class="menu_button" data-bulk="create">สร้างที่มีบน Dropbox ทั้งหมด (${nNew})</div>`,
+            nNew + nGone > 1 && `<div class="menu_button" data-bulk="purge">ลบทุกเครื่อง: แชทที่ไม่มีในเครื่องนี้ทั้งหมด (${nNew + nGone})</div>`,
+            nNew > 1 && `<div class="menu_button" data-bulk="skip">ข้ามทั้งหมด (${nNew})</div>`,
+        ].filter(Boolean);
+        wrap.querySelector('#cab_sync_foot').innerHTML = `<small>ก่อนเขียนทับหรือลบแชทในเครื่อง ระบบเก็บฉบับเดิมไว้ในรายการ backup · "เก็บทั้งคู่" สร้างฉบับ Dropbox เป็นไฟล์แชทใหม่ · "ลบทุกเครื่อง" ลบไฟล์ออกจาก Dropbox และเครื่องอื่นจะลบตาม (Dropbox เก็บไฟล์ที่ลบไว้ให้กู้ได้ประมาณ 30 วัน)</small>`
+            + (bulk.length ? `<div class="cab_buttons">${bulk.join('')}</div>` : '');
 
         wrap.querySelectorAll('[data-a]').forEach(btn => {
             const item = items[Number(btn.dataset.i)];
@@ -2649,9 +2787,14 @@ function showSyncDecisions() {
                 } else if (a === 'both') {
                     const copy = await syncKeepBoth(item);
                     toast.ok(`บันทึกฉบับ Dropbox เป็นแชท "${copy.chatId}"`, 'ซิงค์');
-                } else if (a === 'delete') {
-                    if (!confirm(`ลบไฟล์แชท "${item.t.chatId}" ออกจาก Dropbox?\nเครื่องอื่นที่มีแชทนี้อยู่แล้วจะไม่ถูกลบ`)) return;
-                    await syncDeleteRemote(item);
+                } else if (a === 'purge') {
+                    if (!confirm(`ลบแชท "${item.t.chatId}" ออกจาก Dropbox?\nเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าที่นั่นไม่ได้แก้แชทนี้ ถ้าแก้จะถามก่อน)`)) return;
+                    await syncDeleteEverywhere(item.t);
+                } else if (a === 'dellocal') {
+                    if (!confirm(`ลบแชท "${item.t.chatId}" (${item.local.count} ข้อความ) ในเครื่องนี้ด้วย?\nฉบับนี้จะเก็บไว้ในรายการ backup`)) return;
+                    await syncDeleteLocal(item);
+                } else if (a === 'keep') {
+                    await syncKeepDeleted(item);
                 } else {
                     syncSkip(item);
                 }
@@ -2660,6 +2803,16 @@ function showSyncDecisions() {
         });
         wrap.querySelectorAll('[data-bulk]').forEach(btn => {
             btn.addEventListener('click', act(btn, async () => {
+                if (btn.dataset.bulk === 'purge') {
+                    const gone = sync.decisions.filter(x => x.kind === 'new' || x.kind === 'gone');
+                    if (!confirm(`ลบ ${gone.length} แชทที่ไม่มีในเครื่องนี้ ออกจาก Dropbox?\nเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าที่นั่นไม่ได้แก้แชทนั้น ถ้าแก้จะถามก่อน)`)) return;
+                    for (let i = 0; i < gone.length; i++) {
+                        btn.textContent = `กำลังลบ ${i + 1}/${gone.length}…`;
+                        await syncDeleteEverywhere(gone[i].t);
+                        done(gone[i]);
+                    }
+                    return;
+                }
                 const list = sync.decisions.filter(x => x.kind === 'new');
                 if (btn.dataset.bulk === 'skip') { list.forEach(x => { syncSkip(x); done(x); }); return; }
                 if (!confirm(`สร้าง ${list.length} แชทจาก Dropbox ในเครื่องนี้?`)) return;
