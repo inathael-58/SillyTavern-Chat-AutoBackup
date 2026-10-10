@@ -203,3 +203,73 @@
 #cab_modal .cab_problem .cab_primary { border-color: var(--SmartThemeQuoteColor, #e18a24); font-weight: 700; }
 #cab_modal .menu_button.disabled { opacity: 0.5; pointer-events: none; }
 #cab_modal .cab_linkish { cursor: pointer; text-decoration: underline; }
+
+/* ---------------------------------------------------------------- v2.4: sync badge
+ * Top of the screen, on every page, while sync checks or writes (wait before opening a chat).
+ */
+#cab_syncbadge {
+    --cab-font-size: 12px;
+    --cab-fg: var(--SmartThemeQuoteColor, #e18a24);
+    --cab-bg: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
+    position: fixed;
+    top: calc(var(--topBarBlockSize, 45px) + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 3011;
+    box-sizing: border-box;
+    max-width: calc(100vw - 32px);
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    font-size: calc(var(--cab-font-size) + 1px);
+    line-height: 1.3;
+    font-family: var(--mainFontFamily, inherit);
+    font-variant-numeric: tabular-nums;
+    color: var(--SmartThemeBodyColor, #ddd);
+    background: var(--cab-bg);
+    backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 999px;
+    padding: 0.4em 1em 0.4em 0.75em;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    animation: cab_badge_in 0.2s ease-out;
+}
+#cab_syncbadge[hidden] { display: none; }
+#cab_syncbadge:focus-visible { outline: 1px solid var(--cab-fg); }
+#cab_syncbadge .cab_badge_icon {
+    flex-shrink: 0;
+    width: 1.1em;
+    text-align: center;
+    font-weight: 700;
+    color: var(--cab-fg);
+}
+#cab_syncbadge .cab_spin {
+    box-sizing: border-box;
+    height: 1.1em;
+    border: 0.18em solid color-mix(in srgb, var(--cab-fg) 25%, transparent);
+    border-top-color: var(--cab-fg);
+    border-radius: 50%;
+    animation: cab_spin 0.8s linear infinite;
+}
+#cab_syncbadge .cab_badge_text { display: flex; flex-direction: column; min-width: 0; }
+#cab_syncbadge .cab_badge_main { font-weight: 600; }
+#cab_syncbadge .cab_badge_sub {
+    font-size: 0.85em;
+    opacity: 0.75;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#cab_syncbadge[data-phase="done"] .cab_badge_icon { color: var(--SmartThemeQuoteColor, #6c6); }
+#cab_syncbadge[data-phase="decide"],
+#cab_syncbadge[data-phase="error"] { border-color: var(--cab-fg); }
+#cab_syncbadge[data-phase="error"] .cab_badge_icon { color: #e05050; }
+@keyframes cab_spin { to { transform: rotate(360deg); } }
+@keyframes cab_badge_in { from { opacity: 0; transform: translate(-50%, -6px); } }
+@media (prefers-reduced-motion: reduce) {
+    #cab_syncbadge { animation: none; }
+    #cab_syncbadge .cab_spin { animation-duration: 2.4s; }
+}

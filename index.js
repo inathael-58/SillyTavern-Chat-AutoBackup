@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.3.0'; // keep in sync with manifest.json
+const VERSION = '2.4.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze({
     // syncAuto: write chats that are newer in Dropbox (from another device or ST server) back into this server.
     // syncSince: when sync was first used on this server — older Dropbox-only chats are offered, not created.
     // syncDeletes: once sync is in use, deleting a chat here also removes it from Dropbox and the other devices.
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true, syncLorebooks: true, syncPersonas: true, syncQuickReplies: true, syncRegex: true }), // indicatorStyle: 'full' | 'short' | 'off'
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true, syncLorebooks: true, syncPersonas: true, syncQuickReplies: true, syncRegex: true, syncBadge: true }), // indicatorStyle: 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -1398,6 +1398,7 @@ function renderSettings() {
                     <label class="checkbox_label" title="ชุด Quick Reply ทั้งหมด ชุดที่อัปเดตจากอีกเครื่องจะใช้ได้หลังโหลดหน้าใหม่ (จะขึ้นแจ้งเตือนให้แตะ)"><input type="checkbox" id="cab_sync_qr"> ซิงค์ Quick Reply ด้วย</label>
                     <label class="checkbox_label" title="regex แบบ global (regex ที่ผูกกับการ์ดหรือ preset ไปพร้อมการ์ด/preset อยู่แล้ว) ใช้ได้ทันที"><input type="checkbox" id="cab_sync_regex"> ซิงค์ regex ด้วย</label>
                     <label class="checkbox_label" title="การ์ดตัวละคร (ข้อมูลการ์ด รูป lorebook ที่ฝังในการ์ด) ชื่อไฟล์ avatar เหมือนกันทุกเครื่อง แชทจึงจับคู่กันได้ — ครั้งแรกต้องส่งการ์ดทุกใบขึ้น Dropbox อาจใช้เวลาและเน็ต"><input type="checkbox" id="cab_sync_cards"> ซิงค์การ์ดตัวละครด้วย</label>
+                    <label class="checkbox_label" title="วงกลมหมุนด้านบนจอตอนเปิดแอปหรือกลับเข้าแอป ขณะตรวจเช็คและซิงค์กับ Dropbox — ขึ้น ✓ ซิงค์เรียบร้อย แล้วค่อยเปิดแชท (การตรวจเบื้องหลังทุก 3 นาทีจะขึ้นเฉพาะตอนใช้เวลานานหรือมีอะไรอัปเดต)"><input type="checkbox" id="cab_sync_badge"> แสดงสัญลักษณ์สถานะซิงค์ด้านบนจอ</label>
                     <small id="cab_sync_status" class="cab_note"></small>
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
@@ -2130,16 +2131,24 @@ function wireDbxPanel() {
     $('cab_sync_regex').addEventListener('change', e => { d.syncRegex = e.target.checked; saveSettings(); });
     $('cab_sync_cards').checked = d.syncCards !== false;
     $('cab_sync_cards').addEventListener('change', e => { d.syncCards = e.target.checked; saveSettings(); });
+    $('cab_sync_badge').checked = d.syncBadge !== false;
+    $('cab_sync_badge').addEventListener('change', e => { d.syncBadge = e.target.checked; saveSettings(); renderSyncBadge(); });
     $('cab_sync_deletes').checked = d.syncDeletes !== false;
     $('cab_sync_deletes').addEventListener('change', e => { d.syncDeletes = e.target.checked; saveSettings(); });
 
     renderDbxPanel();
     renderSyncStatus();
     setInterval(() => cloudTick(), 30_000);
-    setInterval(() => syncSoon(0), 3 * 60_000);
+    setInterval(() => syncSoon(0, { quiet: true }), 3 * 60_000);
     if (dbxConnected()) {
         setTimeout(() => cloudTick(), 5000);
         syncSoon(6000);
+        // Characters and groups are loaded by then, so the check can start sooner.
+        const { eventSource, event_types: E } = ctx();
+        if (E?.APP_READY) {
+            let once = false;
+            eventSource.on(E.APP_READY, () => { if (!once) { once = true; syncSoon(1000); } });
+        }
     }
 }
 
@@ -2612,13 +2621,15 @@ async function listChatFiles(only) {
  * Bring this server up to date with Dropbox: write what is safe, collect what needs a choice.
  * auto: skip (don't wait) if Dropbox is busy.
  */
-async function syncPull({ auto = false, only = null } = {}) {
+async function syncPull({ auto = false, only = null, quiet = false } = {}) {
     if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
     const d = dbxSettings();
     if (!d.syncSince) { d.syncSince = Date.now(); saveSettings(); }
+    if (cloud.running && !auto) setBadge('pending', 'รอส่งขึ้น Dropbox ให้เสร็จก่อน…', { quiet });
     return await withCloudLock(async () => {
         const out = { applied: [], decisions: [], missing: new Map(), errors: [], itemsApplied: [], itemsSent: 0 };
         sync.error = '';
+        setBadge('check', '', { quiet });
         try {
             const files = await listChatFiles(only);
             if (!only) await syncItems(files, out, { auto });
@@ -2634,8 +2645,7 @@ async function syncPull({ auto = false, only = null } = {}) {
             const parsed = files.map(parse);
             const inDropbox = new Set(parsed.filter(p => p && !p.tomb).map(p => p.t.key));
             for (let i = 0; i < files.length; i++) {
-                sync.progress = `กำลังตรวจ ${i + 1}/${files.length}…`;
-                renderSyncStatus();
+                syncProgress(`กำลังตรวจ ${i + 1}/${files.length}…`, `แชท ${i + 1}/${files.length}`);
                 if (!parsed[i]) continue;
                 const { tomb, t } = parsed[i];
                 if (tomb && inDropbox.has(t.key)) continue; // the chat came back since: it wins
@@ -2647,6 +2657,7 @@ async function syncPull({ auto = false, only = null } = {}) {
                     const item = tomb ? await syncClassifyDeleted(files[i], t) : await syncClassify(files[i], t);
                     if (!item) continue;
                     if (AUTO_KINDS.includes(item.kind)) {
+                        badgeApply(t.label);
                         await (item.kind === 'remove' ? syncDeleteLocal(item) : syncUseRemote(item));
                         out.applied.push(item);
                     } else {
@@ -2678,6 +2689,7 @@ async function syncPull({ auto = false, only = null } = {}) {
         sync.lastAt = Date.now();
         sync.error = out.errors.join(' · ');
         renderSyncStatus();
+        badgeFinish(out.applied.length + out.itemsApplied.length);
         return out;
     }, { wait: !auto });
 }
@@ -2694,7 +2706,9 @@ function syncReport(r, { quiet = false } = {}) {
     }
     const fresh = sync.decisions.filter(x => !sync.notified.has(`${x.t.key}|${x.rev}`));
     for (const x of sync.decisions) sync.notified.add(`${x.t.key}|${x.rev}`);
-    if (sync.decisions.length && (fresh.length || !quiet)) {
+    // Background runs leave this to the sync badge, which stays until the choice is made.
+    const badgeSays = quiet && dbxSettings().syncBadge !== false;
+    if (sync.decisions.length && (fresh.length || !quiet) && !badgeSays) {
         toast.warn(`มี ${sync.decisions.length} รายการที่ต้องเลือกว่าจะใช้ฉบับไหน — แตะที่นี่`, 'ซิงค์', {
             timeOut: quiet ? 15_000 : 0, extendedTimeOut: 0, closeButton: true, onclick: () => showSyncDecisions(),
         });
@@ -2707,21 +2721,40 @@ function syncReport(r, { quiet = false } = {}) {
 async function syncNow(opts = {}) {
     await flush();
     const r = await syncPull(opts);
+    if (r?.busy) badgeRest();
     syncReport(r);
     if (sync.decisions.length && opts.only) showSyncDecisions();
     return r;
 }
 
-function syncSoon(delay = 2000) {
+/**
+ * Automatic sync after `delay` ms. quiet: the 3-minute background check — the badge only
+ * shows if it takes a while or changes something. Otherwise (opening or returning to the
+ * app) the badge says "waiting to check" right away.
+ */
+function syncSoon(delay = 2000, { quiet = false } = {}) {
     if (!dbxConnected() || !dbxSettings().syncAuto) return;
+    quiet = quiet && !(sync.timer && sync.soonQuiet === false); // don't downgrade a visible run already queued
     clearTimeout(sync.timer);
+    sync.soonQuiet = quiet;
+    if (!quiet && !badgeBusy()) setBadge('pending', '', { quiet });
     sync.timer = setTimeout(async () => {
-        if (document.visibilityState === 'hidden' || Date.now() - sync.lastAt < 20_000) return;
-        try { syncReport(await syncPull({ auto: true }), { quiet: true }); } catch (e) { sync.error = String(e?.message ?? e); renderSyncStatus(); }
+        sync.timer = null;
+        if (document.visibilityState === 'hidden' || Date.now() - sync.lastAt < (quiet ? 20_000 : 5_000)) { badgeRest(); return; }
+        try {
+            const r = await syncPull({ auto: true, quiet });
+            if (r?.busy) { syncSoon(3000, { quiet }); return; } // an upload holds Dropbox: try again shortly
+            syncReport(r, { quiet: true });
+        } catch (e) {
+            sync.error = String(e?.message ?? e);
+            renderSyncStatus();
+            setBadge('error', sync.error);
+        }
     }, delay);
 }
 
 function renderSyncStatus() {
+    if (badge.phase === 'decide') { if (sync.decisions.length) renderSyncBadge(); else setBadge('done'); }
     const el = document.getElementById('cab_sync_status');
     const btn = document.getElementById('cab_sync_decide');
     if (btn) {
@@ -2742,6 +2775,128 @@ function renderSyncStatus() {
     }
     if (sync.error) parts.push(`⚠ ${sync.error}`);
     el.textContent = parts.join(' · ');
+}
+
+function syncProgress(text, short) {
+    sync.progress = text;
+    renderSyncStatus();
+    if (badgeBusy()) { badge.detail = short; renderSyncBadge(); }
+}
+
+// ---------------------------------------------------------------- sync badge
+//
+// A pill at the top of the screen, on every page (not only inside a chat), so the user
+// knows to wait before opening a chat:
+//   ◌ รอตรวจเช็คข้อมูล…    app just opened / came back; the check starts in a moment
+//   ◌ กำลังตรวจเช็คข้อมูล… comparing with Dropbox (nothing written yet)
+//   ◌ กำลังซิงค์…          writing something from the other device into this one
+//   ✓ ซิงค์เรียบร้อย       disappears after a few seconds
+//   ⚠ รอเลือก N รายการ     stays; tap to choose
+//   ✗ ซิงค์ไม่สำเร็จ       stays until the next good run; tap for details
+
+const badge = { phase: 'idle', text: '', detail: '', quiet: false, revealed: false, changed: false, timer: null, revealTimer: null };
+const BADGE_BUSY = ['pending', 'check', 'apply'];
+const badgeBusy = () => BADGE_BUSY.includes(badge.phase);
+
+function setBadge(phase, text = '', { quiet = badge.quiet } = {}) {
+    const wasBusy = badgeBusy();
+    badge.phase = phase;
+    badge.text = text;
+    clearTimeout(badge.timer);
+    if (BADGE_BUSY.includes(phase)) {
+        if (!wasBusy) { badge.changed = false; badge.detail = ''; badge.quiet = quiet; badge.revealed = false; }
+        if (!quiet) badge.quiet = false;
+        if (phase !== 'check') badge.detail = '';
+        // A background check that finishes quickly and changes nothing never shows.
+        if (!badge.quiet || phase === 'apply') badge.revealed = true;
+        else if (!badge.revealed && !badge.revealTimer) {
+            badge.revealTimer = setTimeout(() => { badge.revealTimer = null; if (badgeBusy()) { badge.revealed = true; renderSyncBadge(); } }, 1500);
+        }
+    } else {
+        clearTimeout(badge.revealTimer);
+        badge.revealTimer = null;
+        if (phase === 'done') badge.timer = setTimeout(() => setBadge('idle'), 4000);
+    }
+    renderSyncBadge();
+}
+
+function badgeApply(label) {
+    badge.changed = true;
+    setBadge('apply', label);
+}
+
+/** End of a sync run: done, waiting for choices, or failed. */
+function badgeFinish(changed) {
+    if (sync.error) setBadge('error', sync.error);
+    else if (sync.decisions.length) setBadge('decide');
+    else if (badge.quiet && !badge.revealed && !changed) setBadge('idle');
+    else setBadge('done', changed ? `อัปเดต ${changed} รายการ` : '');
+}
+
+/** Nothing ran after all: go back to what the last run left (choices or an error stay). */
+function badgeRest() {
+    if (!badgeBusy()) return;
+    if (sync.error) setBadge('error', sync.error);
+    else if (sync.decisions.length) setBadge('decide');
+    else setBadge('idle');
+}
+
+function renderSyncBadge() {
+    let el = document.getElementById('cab_syncbadge');
+    // A background check not shown (yet) leaves what was there: pending choices, or nothing.
+    const phase = badgeBusy() && !badge.revealed ? (sync.decisions.length ? 'decide' : 'idle') : badge.phase;
+    const show = dbxConnected() && dbxSettings().syncBadge !== false && phase !== 'idle'
+        && !(phase === 'decide' && !sync.decisions.length);
+    if (!show) { if (el) el.hidden = true; return; }
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'cab_syncbadge';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.tabIndex = 0;
+        el.addEventListener('click', onBadgeTap);
+        el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onBadgeTap(); } });
+        document.body.appendChild(el);
+    }
+    const size = clamp(Number(settings().indicatorFontSize) || DEFAULTS.indicatorFontSize, 8, 40);
+    el.style.setProperty('--cab-font-size', `${size}px`);
+    const n = sync.decisions.length;
+    const view = {
+        pending: { icon: 'spin', main: badge.text || 'รอตรวจเช็คข้อมูลกับ Dropbox…', sub: 'รอสักครู่ก่อนเปิดแชท' },
+        check: { icon: 'spin', main: `กำลังตรวจเช็คข้อมูล…${badge.detail ? ` (${badge.detail})` : ''}`, sub: 'รอสักครู่ก่อนเปิดแชท' },
+        apply: { icon: 'spin', main: 'กำลังซิงค์…', sub: badge.text },
+        done: { icon: '✓', main: 'ซิงค์เรียบร้อย', sub: badge.text },
+        decide: { icon: '⚠', main: `รอเลือก ${n} รายการ`, sub: 'แตะเพื่อเลือกว่าจะใช้ฉบับไหน' },
+        error: { icon: '✗', main: 'ซิงค์ไม่สำเร็จ', sub: 'แตะเพื่อดูสาเหตุและลองใหม่' },
+    }[phase];
+    const icon = document.createElement('span');
+    icon.className = 'cab_badge_icon';
+    if (view.icon === 'spin') icon.classList.add('cab_spin'); else icon.textContent = view.icon;
+    const text = document.createElement('span');
+    text.className = 'cab_badge_text';
+    const main = document.createElement('span');
+    main.className = 'cab_badge_main';
+    main.textContent = view.main;
+    text.append(main);
+    if (view.sub) {
+        const sub = document.createElement('span');
+        sub.className = 'cab_badge_sub';
+        sub.textContent = view.sub;
+        text.append(sub);
+    }
+    el.replaceChildren(icon, text);
+    el.dataset.phase = phase;
+    el.title = phase === 'error' ? sync.error : `${view.main}${view.sub ? `\n${view.sub}` : ''}`;
+    el.hidden = false;
+}
+
+function onBadgeTap() {
+    if (badge.phase === 'decide' || (badgeBusy() && !badge.revealed)) showSyncDecisions();
+    else if (badge.phase === 'error') {
+        toast.err(`${sync.error || 'ไม่ทราบสาเหตุ'}<br>กำลังลองใหม่…`, 'ซิงค์');
+        syncNow().catch(e => { sync.error = String(e?.message ?? e); renderSyncStatus(); setBadge('error', sync.error); });
+    } else if (badgeBusy()) toast.info('กำลังเทียบข้อมูลกับ Dropbox — รอให้ขึ้น ✓ ซิงค์เรียบร้อย ก่อนค่อยเปิดแชท', 'ซิงค์');
+    else setBadge('idle');
 }
 
 const SYNC_KIND = {
@@ -3460,14 +3615,14 @@ async function syncItems(entries, out, { auto = false } = {}) {
         const key = keys[i];
         const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
         const label = (L || R || T).label;
-        sync.progress = `กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`;
-        renderSyncStatus();
+        syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
         try {
             if (!R && T) {
                 // Deleted on another device.
                 if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
                 if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
                 if (B && !B.deleted && (await itemHash(L)) === B.hash) {
+                    badgeApply(label);
                     await deleteItemLocally(L);
                     setItemBase(key, { deleted: true, rev: T.rev });
                     out.itemsApplied.push(`ลบ ${label}`);
@@ -3504,6 +3659,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
             const lh = L ? await itemHash(L) : null;
             if (lh === content.hash) { setItemBase(key, { rev: R.rev, hash: lh }); continue; }
             if (!L || (B && lh === B.hash)) {
+                badgeApply(L?.label ?? R.label);
                 await applyItem(R, content, L);
                 setItemBase(key, { rev: R.rev, hash: content.hash });
                 if (R.type === 'card') cardsApplied.push({ key, rev: R.rev });
@@ -3780,6 +3936,6 @@ async function init() {
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION };
+globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, syncSoon, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION };
 
 if (typeof jQuery === 'function') jQuery(init); else init();
