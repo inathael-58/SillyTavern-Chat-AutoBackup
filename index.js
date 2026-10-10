@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.0.0'; // keep in sync with manifest.json
+const VERSION = '2.1.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze({
     // syncAuto: write chats that are newer in Dropbox (from another device or ST server) back into this server.
     // syncSince: when sync was first used on this server — older Dropbox-only chats are offered, not created.
     // syncDeletes: once sync is in use, deleting a chat here also removes it from Dropbox and the other devices.
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true }), // indicatorStyle: 'full' | 'short' | 'off'
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true, syncLorebooks: true, syncPersonas: true }), // indicatorStyle: 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -1393,6 +1393,8 @@ function renderSettings() {
                     <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
                     <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแชทแล้วลบใน Dropbox และเครื่องอื่นด้วย</label>
                     <label class="checkbox_label" title="preset ทุกประเภทที่ ST จัดการ (Chat/Text Completion, Instruct, Context, System Prompt, Reasoning…) ถ้า preset ที่เลือกใช้อยู่ถูกอัปเดตจากอีกเครื่อง จะโหลดค่าใหม่ให้"><input type="checkbox" id="cab_sync_presets"> ซิงค์ preset ด้วย</label>
+                    <label class="checkbox_label" title="lorebook (World Info) ที่เป็นไฟล์แยก ถ้าเปิด lorebook นั้นค้างไว้ในหน้าแก้ จะโหลดฉบับใหม่ให้"><input type="checkbox" id="cab_sync_worlds"> ซิงค์ lorebook ด้วย</label>
+                    <label class="checkbox_label" title="ชื่อ คำอธิบาย ตำแหน่ง/ความลึก lorebook ที่ผูกไว้ การผูกกับตัวละคร และรูป persona (การเปลี่ยนแค่รูปจะไปพร้อมการแก้ครั้งถัดไป)"><input type="checkbox" id="cab_sync_personas"> ซิงค์ persona ด้วย</label>
                     <label class="checkbox_label" title="การ์ดตัวละคร (ข้อมูลการ์ด รูป lorebook ที่ฝังในการ์ด) ชื่อไฟล์ avatar เหมือนกันทุกเครื่อง แชทจึงจับคู่กันได้ — ครั้งแรกต้องส่งการ์ดทุกใบขึ้น Dropbox อาจใช้เวลาและเน็ต"><input type="checkbox" id="cab_sync_cards"> ซิงค์การ์ดตัวละครด้วย</label>
                     <small id="cab_sync_status" class="cab_note"></small>
                     <div class="cab_buttons">
@@ -2116,6 +2118,10 @@ function wireDbxPanel() {
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
     $('cab_sync_presets').checked = d.syncPresets !== false;
     $('cab_sync_presets').addEventListener('change', e => { d.syncPresets = e.target.checked; saveSettings(); });
+    $('cab_sync_worlds').checked = d.syncLorebooks !== false;
+    $('cab_sync_worlds').addEventListener('change', e => { d.syncLorebooks = e.target.checked; saveSettings(); });
+    $('cab_sync_personas').checked = d.syncPersonas !== false;
+    $('cab_sync_personas').addEventListener('change', e => { d.syncPersonas = e.target.checked; saveSettings(); });
     $('cab_sync_cards').checked = d.syncCards !== false;
     $('cab_sync_cards').addEventListener('change', e => { d.syncCards = e.target.checked; saveSettings(); });
     $('cab_sync_deletes').checked = d.syncDeletes !== false;
@@ -2678,7 +2684,7 @@ function syncReport(r, { quiet = false } = {}) {
     if (removed.length) toast.info(`ลบ ${removed.length} แชทที่ถูกลบจากอีกเครื่อง: ${names(removed)} (ยังกู้ได้จากรายการ backup)`, 'ซิงค์');
     if (r.itemsApplied?.length) {
         const n = r.itemsApplied;
-        toast.ok(`อัปเดต ${n.length} preset/การ์ดจาก Dropbox: ${n.slice(0, 4).join(', ')}${n.length > 4 ? ' …' : ''}`, 'ซิงค์');
+        toast.ok(`อัปเดตจาก Dropbox ${n.length} รายการ: ${n.slice(0, 4).join(', ')}${n.length > 4 ? ' …' : ''}`, 'ซิงค์');
     }
     const fresh = sync.decisions.filter(x => !sync.notified.has(`${x.t.key}|${x.rev}`));
     for (const x of sync.decisions) sync.notified.add(`${x.t.key}|${x.rev}`);
@@ -2722,7 +2728,7 @@ function renderSyncStatus() {
     else if (sync.lastAt) parts.push(`ซิงค์ล่าสุด ${fmtTime(sync.lastAt).slice(11, 16)}`);
     else parts.push('ยังไม่ได้ซิงค์ในรอบนี้');
     if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
-    if (sync.items) parts.push(`preset/การ์ด: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
+    if (sync.items) parts.push(`preset/การ์ด/lorebook/persona: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
     if (sync.decisions.length) parts.push(`รอเลือก ${sync.decisions.length} รายการ`);
     if (sync.missing.length) {
         const n = sync.missing.reduce((a, [, k]) => a + k, 0);
@@ -2987,7 +2993,101 @@ async function localCardHash(item) {
     return h;
 }
 
-const itemHash = item => (item.type === 'preset' ? presetHash(item.obj) : localCardHash(item));
+const lorebookPath = name => `/worlds/${dbxSeg(name)}.json`;
+const personaPath = id => `/personas/${dbxSeg(id)}.json`;
+
+/** Every lorebook (World Info file), keyed `wi:<name>`. Read through ST's cache, so ST's own edits are seen. */
+async function localLorebooks() {
+    const out = new Map();
+    const c = ctx();
+    const names = typeof c.getWorldInfoNames === 'function' ? c.getWorldInfoNames() : [];
+    for (const name of names) {
+        let obj;
+        try { obj = await c.loadWorldInfo?.(name); } catch { obj = null; }
+        if (!obj || typeof obj !== 'object') continue;
+        out.set(`wi:${name}`, { key: `wi:${name}`, type: 'wi', name, obj, label: `Lorebook: ${name}` });
+    }
+    return out;
+}
+
+/** Every persona, keyed `persona:<avatar file>`: its name and description settings. */
+function localPersonas() {
+    const out = new Map();
+    const pu = ctx().powerUserSettings;
+    for (const [id, name] of Object.entries(pu?.personas || {})) {
+        if (!id) continue;
+        const obj = { name: String(name ?? ''), descriptor: pu.persona_descriptions?.[id] ?? {} };
+        out.set(`persona:${id}`, { key: `persona:${id}`, type: 'persona', id, obj, label: `Persona: ${name || id}` });
+    }
+    return out;
+}
+
+// Lorebooks are edited in place by ST's editor, so their hash is never cached by object.
+const personaHash = obj => hash(stableJson(lean({ name: obj?.name, descriptor: obj?.descriptor })));
+const itemHash = item => (item.type === 'preset' ? presetHash(item.obj)
+    : item.type === 'card' ? localCardHash(item)
+    : item.type === 'persona' ? personaHash(item.obj)
+    : hash(stableJson(lean(item.obj))));
+
+const blobToDataUrl = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
+
+/** The persona's picture as a data URL (null when it can't be read or is very large). */
+async function personaImage(id) {
+    try {
+        const res = await fetch(`User Avatars/${encodeURIComponent(id)}`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return blob.size && blob.size < 8_000_000 ? await blobToDataUrl(blob) : null;
+    } catch { return null; }
+}
+
+/** Save a lorebook through ST, keeping its cache, list and open editor up to date. */
+async function applyLorebook(name, obj) {
+    const c = ctx();
+    const isNew = !(c.getWorldInfoNames?.() || []).includes(name);
+    await c.saveWorldInfo(name, obj, true);
+    if (isNew) { try { await c.updateWorldInfoList?.(); } catch (e) { console.warn(LOG, e); } }
+    try { await c.reloadWorldInfoEditor?.(name); } catch { /* editor not open */ }
+}
+
+/** Write a persona's name, description settings and picture; refresh the active persona's copy. */
+async function applyPersona(id, obj, local) {
+    const c = ctx();
+    const pu = c.powerUserSettings;
+    if (!pu) throw new Error('ST รุ่นนี้ไม่เปิดให้แก้ persona จาก extension');
+    if (obj.image) {
+        const blob = await (await fetch(obj.image)).blob();
+        const form = new FormData();
+        form.append('avatar', new File([blob], id, { type: blob.type || 'image/png' }));
+        form.append('overwrite_name', id);
+        const headers = { ...c.getRequestHeaders() };
+        delete headers['Content-Type'];
+        const res = await fetch('/api/avatars/upload', { method: 'POST', headers, body: form });
+        if (!res.ok) console.warn(LOG, 'persona picture upload failed', res.status);
+    }
+    // The active persona's description is copied into power_user; keep that copy in step.
+    const old = local?.obj?.descriptor;
+    const active = old && pu.personas?.[id] === c.name1 && pu.persona_description === (old.description ?? '');
+    pu.personas ??= {};
+    pu.persona_descriptions ??= {};
+    pu.personas[id] = obj.name;
+    pu.persona_descriptions[id] = structuredClone(obj.descriptor ?? {});
+    if (active) {
+        const dsc = pu.persona_descriptions[id];
+        pu.persona_description = dsc.description ?? '';
+        if (dsc.position !== undefined) pu.persona_description_position = dsc.position;
+        if (dsc.depth !== undefined) pu.persona_description_depth = dsc.depth;
+        if (dsc.role !== undefined) pu.persona_description_role = dsc.role;
+        pu.persona_description_lorebook = dsc.lorebook ?? '';
+        try { jQuery('#persona_description').val(pu.persona_description); } catch { /* no UI */ }
+    }
+    c.saveSettingsDebounced();
+}
+
+async function localItemsOf(type) {
+    return type === 'preset' ? localPresets() : type === 'card' ? localCards()
+        : type === 'persona' ? localPersonas() : await localLorebooks();
+}
 
 /** The text of a PNG tEXt chunk (SillyTavern keeps the card JSON, base64, under "chara"). */
 async function pngText(blob, keyword) {
@@ -3024,6 +3124,14 @@ async function downloadItem(entry) {
         const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
         return { obj, hash: presetHash(obj) };
     }
+    if (entry.type === 'wi') {
+        const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        return { obj, hash: hash(stableJson(lean(obj))) };
+    }
+    if (entry.type === 'persona') {
+        const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        return { obj, hash: personaHash(obj) };
+    }
     const blob = await dbxDownloadBlob(`rev:${entry.rev}`);
     return { blob, hash: cardDataHash(await cardFromPng(blob)) };
 }
@@ -3033,6 +3141,13 @@ async function uploadItem(item, h, rev) {
     if (item.type === 'preset') {
         path = presetPath(item.apiId, item.name);
         blob = new Blob([JSON.stringify(item.obj, null, 4)], { type: 'application/octet-stream' });
+    } else if (item.type === 'wi') {
+        path = lorebookPath(item.name);
+        blob = new Blob([JSON.stringify(item.obj, null, 4)], { type: 'application/octet-stream' });
+    } else if (item.type === 'persona') {
+        path = personaPath(item.id);
+        // The picture travels along, but only name and description count as a change.
+        blob = new Blob([JSON.stringify({ ...item.obj, image: await personaImage(item.id) })], { type: 'application/octet-stream' });
     } else {
         path = cardPath(item.avatar);
         const res = await fetch('/api/characters/export', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ format: 'png', avatar_url: item.avatar }) });
@@ -3098,6 +3213,8 @@ async function applyCard(avatar, blob, localCh) {
 
 async function applyItem(entry, content, local) {
     if (entry.type === 'preset') await applyPreset(entry.apiId, entry.name, content.obj);
+    else if (entry.type === 'wi') await applyLorebook(entry.name, content.obj);
+    else if (entry.type === 'persona') await applyPersona(entry.id, content.obj, local);
     else await applyCard(entry.avatar, content.blob, local?.ch);
 }
 
@@ -3120,7 +3237,8 @@ async function refreshCardsAfter(applied) {
 async function syncItems(entries, out, { auto = false } = {}) {
     const d = dbxSettings();
     const doPresets = d.syncPresets !== false, doCards = d.syncCards !== false;
-    if (!doPresets && !doCards) return;
+    const doWorlds = d.syncLorebooks !== false, doPersonas = d.syncPersonas !== false;
+    if (!doPresets && !doCards && !doWorlds && !doPersonas) return;
     const remote = new Map();
     for (const e of entries) {
         const parts = String(e.path_display || '').split('/').filter(Boolean);
@@ -3130,9 +3248,18 @@ async function syncItems(entries, out, { auto = false } = {}) {
         } else if (doCards && parts[0] === 'cards' && parts.length === 2 && /\.png$/i.test(parts[1])) {
             const avatar = dbxUnseg(parts[1]);
             remote.set(`card:${avatar}`, { ...e, type: 'card', avatar, label: `การ์ด: ${avatar.replace(/\.png$/i, '')}` });
+        } else if (doWorlds && parts[0] === 'worlds' && parts.length === 2 && /\.json$/i.test(parts[1])) {
+            const name = dbxUnseg(parts[1].replace(/\.json$/i, ''));
+            remote.set(`wi:${name}`, { ...e, type: 'wi', name, label: `Lorebook: ${name}` });
+        } else if (doPersonas && parts[0] === 'personas' && parts.length === 2 && /\.json$/i.test(parts[1])) {
+            const id = dbxUnseg(parts[1].replace(/\.json$/i, ''));
+            remote.set(`persona:${id}`, { ...e, type: 'persona', id, label: `Persona: ${id}` });
         }
     }
-    const local = new Map([...(doPresets ? localPresets() : []), ...(doCards ? localCards() : [])]);
+    const local = new Map([
+        ...(doPresets ? localPresets() : []), ...(doCards ? localCards() : []),
+        ...(doWorlds ? await localLorebooks() : []), ...(doPersonas ? localPersonas() : []),
+    ]);
     const keys = [...new Set([...remote.keys(), ...local.keys()])];
     const deadline = auto ? Date.now() + 15_000 : Infinity;
     const cardsApplied = [];
@@ -3140,7 +3267,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
         const key = keys[i];
         const L = local.get(key), R = remote.get(key), B = itemBase(key);
         const label = (L || R).label;
-        sync.progress = `กำลังตรวจ preset/การ์ด ${i + 1}/${keys.length}…`;
+        sync.progress = `กำลังตรวจ preset/การ์ด/lorebook/persona ${i + 1}/${keys.length}…`;
         renderSyncStatus();
         try {
             if (!R) {
@@ -3158,13 +3285,14 @@ async function syncItems(entries, out, { auto = false } = {}) {
             const waiting = sync.decisions.find(x => x.kind === 'item' && x.t.key === key && x.rev === R.rev);
             if (waiting && auto) { out.decisions.push(waiting); continue; }
             const content = await downloadItem(R);
+            if (R.type === 'persona' && content.obj?.name) R.label = `Persona: ${content.obj.name}`;
             const lh = L ? await itemHash(L) : null;
             if (lh === content.hash) { setItemBase(key, { rev: R.rev, hash: lh }); continue; }
             if (!L || (B && lh === B.hash)) {
                 await applyItem(R, content, L);
                 setItemBase(key, { rev: R.rev, hash: content.hash });
                 if (R.type === 'card') cardsApplied.push({ key, rev: R.rev });
-                out.itemsApplied.push(label);
+                out.itemsApplied.push(L?.label ?? R.label);
                 continue;
             }
             if (B && content.hash === B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; continue; }
@@ -3186,7 +3314,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
 async function resolveItem(x, how) {
     const key = x.t.key;
     if (how === 'local') {
-        const item = (x.item.type === 'preset' ? localPresets() : localCards()).get(key);
+        const item = (await localItemsOf(x.item.type)).get(key);
         if (!item) throw new Error('ไม่มีในเครื่องนี้แล้ว');
         await uploadItem(item, await itemHash(item), x.rev);
         return;
