@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '1.9.0'; // keep in sync with manifest.json
+const VERSION = '2.0.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze({
     // syncAuto: write chats that are newer in Dropbox (from another device or ST server) back into this server.
     // syncSince: when sync was first used on this server — older Dropbox-only chats are offered, not created.
     // syncDeletes: once sync is in use, deleting a chat here also removes it from Dropbox and the other devices.
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true }), // indicatorStyle: 'full' | 'short' | 'off'
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true }), // indicatorStyle: 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -1392,6 +1392,8 @@ function renderSettings() {
                     <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
                     <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
                     <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแชทแล้วลบใน Dropbox และเครื่องอื่นด้วย</label>
+                    <label class="checkbox_label" title="preset ทุกประเภทที่ ST จัดการ (Chat/Text Completion, Instruct, Context, System Prompt, Reasoning…) ถ้า preset ที่เลือกใช้อยู่ถูกอัปเดตจากอีกเครื่อง จะโหลดค่าใหม่ให้"><input type="checkbox" id="cab_sync_presets"> ซิงค์ preset ด้วย</label>
+                    <label class="checkbox_label" title="การ์ดตัวละคร (ข้อมูลการ์ด รูป lorebook ที่ฝังในการ์ด) ชื่อไฟล์ avatar เหมือนกันทุกเครื่อง แชทจึงจับคู่กันได้ — ครั้งแรกต้องส่งการ์ดทุกใบขึ้น Dropbox อาจใช้เวลาและเน็ต"><input type="checkbox" id="cab_sync_cards"> ซิงค์การ์ดตัวละครด้วย</label>
                     <small id="cab_sync_status" class="cab_note"></small>
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
@@ -1734,6 +1736,12 @@ async function dbxUpload(path, blob, ts, mode = 'overwrite') {
     });
     if (!res.ok) throw new Error(await dbxError(res));
     return await res.json();
+}
+
+async function dbxDownloadBlob(path) {
+    const res = await dbxFetch(`${DBX_CONTENT}/2/files/download`, { method: 'POST', headers: { 'Dropbox-API-Arg': dbxArg({ path }) } });
+    if (!res.ok) throw new Error(await dbxError(res));
+    return await res.blob();
 }
 
 async function dbxDownloadText(path) {
@@ -2106,6 +2114,10 @@ function wireDbxPanel() {
         if (r?.busy) toast.info('กำลังส่งขึ้น Dropbox อยู่ ลองอีกครั้งในอีกสักครู่', 'ซิงค์');
     }));
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
+    $('cab_sync_presets').checked = d.syncPresets !== false;
+    $('cab_sync_presets').addEventListener('change', e => { d.syncPresets = e.target.checked; saveSettings(); });
+    $('cab_sync_cards').checked = d.syncCards !== false;
+    $('cab_sync_cards').addEventListener('change', e => { d.syncCards = e.target.checked; saveSettings(); });
     $('cab_sync_deletes').checked = d.syncDeletes !== false;
     $('cab_sync_deletes').addEventListener('change', e => { d.syncDeletes = e.target.checked; saveSettings(); });
 
@@ -2577,7 +2589,7 @@ async function listChatFiles(only) {
     const files = [];
     let page = await dbxRpc('files/list_folder', { path: '', recursive: true, limit: 2000 });
     for (;;) {
-        for (const e of page.entries) if (e['.tag'] === 'file' && /\.jsonl?$/i.test(e.name)) files.push(e);
+        for (const e of page.entries) if (e['.tag'] === 'file' && /\.(jsonl?|png)$/i.test(e.name)) files.push(e);
         if (!page.has_more) break;
         page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
     }
@@ -2593,10 +2605,11 @@ async function syncPull({ auto = false, only = null } = {}) {
     const d = dbxSettings();
     if (!d.syncSince) { d.syncSince = Date.now(); saveSettings(); }
     return await withCloudLock(async () => {
-        const out = { applied: [], decisions: [], missing: new Map(), errors: [] };
+        const out = { applied: [], decisions: [], missing: new Map(), errors: [], itemsApplied: [], itemsSent: 0 };
         sync.error = '';
         try {
             const files = await listChatFiles(only);
+            if (!only) await syncItems(files, out, { auto });
             // /character|group/<entity>/<chat>.jsonl, or a deletion marker /deleted/…/<chat>.json
             const parse = f => {
                 const parts = String(f.path_display || '').split('/').filter(Boolean);
@@ -2647,6 +2660,9 @@ async function syncPull({ auto = false, only = null } = {}) {
         ];
         if (!only) sync.missing = [...out.missing.entries()];
         sync.applied += out.applied.length;
+        if (out.itemsApplied.length || out.itemsSent) {
+            sync.items = { got: (sync.items?.got || 0) + out.itemsApplied.length, sent: (sync.items?.sent || 0) + out.itemsSent };
+        }
         sync.lastAt = Date.now();
         sync.error = out.errors.join(' · ');
         renderSyncStatus();
@@ -2660,14 +2676,18 @@ function syncReport(r, { quiet = false } = {}) {
     const updated = r.applied.filter(x => x.kind !== 'remove'), removed = r.applied.filter(x => x.kind === 'remove');
     if (updated.length) toast.ok(`อัปเดต ${updated.length} แชทจาก Dropbox: ${names(updated)}`, 'ซิงค์');
     if (removed.length) toast.info(`ลบ ${removed.length} แชทที่ถูกลบจากอีกเครื่อง: ${names(removed)} (ยังกู้ได้จากรายการ backup)`, 'ซิงค์');
+    if (r.itemsApplied?.length) {
+        const n = r.itemsApplied;
+        toast.ok(`อัปเดต ${n.length} preset/การ์ดจาก Dropbox: ${n.slice(0, 4).join(', ')}${n.length > 4 ? ' …' : ''}`, 'ซิงค์');
+    }
     const fresh = sync.decisions.filter(x => !sync.notified.has(`${x.t.key}|${x.rev}`));
     for (const x of sync.decisions) sync.notified.add(`${x.t.key}|${x.rev}`);
     if (sync.decisions.length && (fresh.length || !quiet)) {
-        toast.warn(`มี ${sync.decisions.length} แชทที่ต้องเลือกว่าจะใช้ฉบับไหน — แตะที่นี่`, 'ซิงค์', {
+        toast.warn(`มี ${sync.decisions.length} รายการที่ต้องเลือกว่าจะใช้ฉบับไหน — แตะที่นี่`, 'ซิงค์', {
             timeOut: quiet ? 15_000 : 0, extendedTimeOut: 0, closeButton: true, onclick: () => showSyncDecisions(),
         });
     }
-    if (!quiet && !r.applied.length && !sync.decisions.length && !r.errors.length) toast.ok('ตรงกับ Dropbox แล้ว', 'ซิงค์');
+    if (!quiet && !r.applied.length && !r.itemsApplied?.length && !sync.decisions.length && !r.errors.length) toast.ok('ตรงกับ Dropbox แล้ว', 'ซิงค์');
     if (r.errors.length && !quiet) toast.err(r.errors.slice(0, 3).join('<br>'), 'ซิงค์');
 }
 
@@ -2694,7 +2714,7 @@ function renderSyncStatus() {
     const btn = document.getElementById('cab_sync_decide');
     if (btn) {
         btn.hidden = !sync.decisions.length;
-        btn.textContent = `เลือกฉบับ (${sync.decisions.length} แชท)`;
+        btn.textContent = `เลือกฉบับ (${sync.decisions.length} รายการ)`;
     }
     if (!el) return;
     const parts = [];
@@ -2702,7 +2722,8 @@ function renderSyncStatus() {
     else if (sync.lastAt) parts.push(`ซิงค์ล่าสุด ${fmtTime(sync.lastAt).slice(11, 16)}`);
     else parts.push('ยังไม่ได้ซิงค์ในรอบนี้');
     if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
-    if (sync.decisions.length) parts.push(`รอเลือก ${sync.decisions.length} แชท`);
+    if (sync.items) parts.push(`preset/การ์ด: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
+    if (sync.decisions.length) parts.push(`รอเลือก ${sync.decisions.length} รายการ`);
     if (sync.missing.length) {
         const n = sync.missing.reduce((a, [, k]) => a + k, 0);
         parts.push(`ข้าม ${n} แชทเพราะไม่มีตัวละคร/กลุ่มนี้ในเครื่องนี้ (${sync.missing.slice(0, 5).map(([l]) => l).join(', ')}${sync.missing.length > 5 ? ' …' : ''})`);
@@ -2717,6 +2738,7 @@ const SYNC_KIND = {
     gone: { title: 'แชทนี้ถูกลบในเครื่องนี้', why: 'เคยซิงค์แชทนี้แล้ว แต่ตอนนี้ไม่มีในเซิร์ฟเวอร์นี้ (ลบหรือเปลี่ยนชื่อ)' },
     new: { title: 'มีบน Dropbox แต่ไม่มีในเครื่องนี้', why: 'แชทที่สร้างจากเครื่องอื่นก่อนเริ่มใช้การซิงค์ที่นี่ หรือเคยลบไปแล้ว' },
     deleted: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบแชทนี้แล้ว แต่ที่นี่มีการแก้หลังซิงค์ครั้งล่าสุด หรือเปิดแชทนี้อยู่' },
+    item: { title: 'แก้ทั้งสองฝั่ง', why: 'แก้ทั้งในเครื่องนี้และจากอีกเครื่อง หลังจากซิงค์กันครั้งล่าสุด (หรือเพิ่งเริ่มซิงค์และสองฝั่งไม่ตรงกัน)' },
 };
 
 function showSyncDecisions() {
@@ -2724,7 +2746,7 @@ function showSyncDecisions() {
     const { wrap } = openModal(`
         <div class="cab_dialog cab_explain">
             <div class="cab_head">
-                <b>ซิงค์แชท — เลือกฉบับที่จะใช้</b>
+                <b>ซิงค์ — เลือกฉบับที่จะใช้</b>
                 <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
             </div>
             <div class="cab_list" id="cab_sync_list"></div>
@@ -2748,6 +2770,17 @@ function showSyncDecisions() {
         const items = sync.decisions;
         wrap.querySelector('#cab_sync_list').innerHTML = items.map((x, i) => {
             const k = SYNC_KIND[x.kind] ?? SYNC_KIND.conflict;
+            if (x.kind === 'item') {
+                const btnsI = [['iremote', 'ใช้ฉบับ Dropbox', true], ['ilocal', 'ใช้ฉบับในเครื่อง'], ...(x.entry.type === 'preset' ? [['iboth', 'เก็บทั้งคู่']] : [])];
+                return `
+            <section class="cab_problem">
+                <h4>${escapeHtml(x.t.label)}</h4>
+                <p><b>${escapeHtml(k.title)}</b> · ${escapeHtml(k.why)}</p>
+                ${x.when ? `<p>ฉบับ Dropbox ส่งขึ้นเมื่อ ${fmtTime(x.when)}</p>` : ''}
+                <div class="cab_buttons">${btnsI.map(([a, label, primary]) =>
+                    `<div class="menu_button${primary ? ' cab_primary' : ''}" data-i="${i}" data-a="${a}">${escapeHtml(label)}</div>`).join('')}</div>
+            </section>`;
+            }
             const diff = x.local.count && !['gone', 'deleted'].includes(x.kind)
                 ? describeChanges({ head: '', msgs: x.local.keys }, { head: '', msgs: x.remote.keys }).join(' · ') : '';
             const btns = x.kind === 'new' ? [['remote', 'สร้างแชทนี้', true], ['purge', 'ลบทุกเครื่อง'], ['skip', 'ข้าม']]
@@ -2778,7 +2811,16 @@ function showSyncDecisions() {
             const item = items[Number(btn.dataset.i)];
             btn.addEventListener('click', act(btn, async () => {
                 const a = btn.dataset.a;
-                if (a === 'remote') {
+                if (a === 'iremote') {
+                    if (!confirm(`ใช้ฉบับ Dropbox แทน "${item.t.label}" ในเครื่องนี้?`)) return;
+                    await resolveItem(item, 'remote');
+                } else if (a === 'ilocal') {
+                    if (!confirm(`ส่งฉบับในเครื่องของ "${item.t.label}" ทับใน Dropbox?\nเครื่องอื่นจะได้ฉบับนี้ตอนซิงค์ครั้งถัดไป`)) return;
+                    await resolveItem(item, 'local');
+                } else if (a === 'iboth') {
+                    const copy = await resolveItem(item, 'both');
+                    toast.ok(`บันทึกฉบับ Dropbox เป็น preset "${copy}" แล้ว`, 'ซิงค์');
+                } else if (a === 'remote') {
                     if (item.local.count && !confirm(`เขียนฉบับ Dropbox (${item.remote.count} ข้อความ) ทับแชท "${item.t.chatId}" ในเครื่องนี้ (${item.local.count} ข้อความ)?\nฉบับในเครื่องจะเก็บไว้ในรายการ backup`)) return;
                     await syncUseRemote(item);
                 } else if (a === 'local') {
@@ -2825,6 +2867,344 @@ function showSyncDecisions() {
         });
     }
     render();
+}
+
+// ---------------------------------------------------------------- presets & character cards
+//
+// Synced the same way as chats, one file per item:
+//   /presets/<api>/<name>.json   a preset file, as SillyTavern stores it
+//   /cards/<avatar>.png          the character card as "Export PNG" makes it
+// Each browser remembers, per item, the Dropbox revision and content hash it last
+// matched. A side that changed alone wins; changes on both sides are the user's call.
+// Cards keep the same avatar file name everywhere, so their chats still match up.
+
+const PRESET_APIS = ['openai', 'textgenerationwebui', 'kobold', 'novel', 'instruct', 'context', 'sysprompt', 'reasoning'];
+const PRESET_LABEL = {
+    openai: 'Chat Completion', textgenerationwebui: 'Text Completion', kobold: 'KoboldAI', novel: 'NovelAI',
+    instruct: 'Instruct', context: 'Context', sysprompt: 'System Prompt', reasoning: 'Reasoning',
+};
+const presetHashCache = new WeakMap(); // preset object -> hash
+const cardHashCache = new Map();       // avatar -> { fp, hash }
+
+function itemStoreKey() { return `cab_item_base:${dbxSettings().appKey || ''}`; }
+function itemBases() {
+    try { return JSON.parse(localStorage.getItem(itemStoreKey()) || '{}') || {}; } catch { return {}; }
+}
+function itemBase(key) { return itemBases()[key] || null; }
+function setItemBase(key, rec) {
+    try {
+        const all = itemBases();
+        if (rec) all[key] = rec; else delete all[key];
+        localStorage.setItem(itemStoreKey(), JSON.stringify(all));
+    } catch { /* storage unavailable: items just get compared again */ }
+}
+
+const presetPath = (apiId, name) => `/presets/${apiId}/${dbxSeg(name)}.json`;
+const cardPath = avatar => `/cards/${dbxSeg(avatar)}`;
+
+function presetManager(apiId) {
+    try { return ctx().getPresetManager?.(apiId) || null; } catch { return null; }
+}
+
+/** Every preset ST has in memory, keyed `p:<api>:<name>`. */
+function localPresets() {
+    const out = new Map();
+    for (const apiId of PRESET_APIS) {
+        const pm = presetManager(apiId);
+        if (!pm?.getPresetList) continue;
+        let list;
+        try { list = pm.getPresetList(apiId); } catch { continue; }
+        const { presets, preset_names } = list || {};
+        if (!Array.isArray(presets) || !preset_names) continue;
+        const pairs = Array.isArray(preset_names) ? preset_names.map((n, i) => [n, i]) : Object.entries(preset_names);
+        for (const [name, idx] of pairs) {
+            let obj = presets[idx];
+            if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch { continue; } }
+            if (!name || !obj || typeof obj !== 'object') continue;
+            out.set(`p:${apiId}:${name}`, { key: `p:${apiId}:${name}`, type: 'preset', apiId, name, obj, label: `${PRESET_LABEL[apiId]}: ${name}` });
+        }
+    }
+    return out;
+}
+
+/**
+ * Drop empty values (undefined, null, "", false, [], {}) so that SillyTavern filling in
+ * defaults when it re-saves a card or preset doesn't count as a change.
+ */
+function lean(v) {
+    if (Array.isArray(v)) return v.map(lean);
+    if (v && typeof v === 'object') {
+        const out = {};
+        for (const [k, x] of Object.entries(v)) {
+            const y = lean(x);
+            if (y === undefined || y === null || y === '' || y === false) continue;
+            if (Array.isArray(y) && !y.length) continue;
+            if (y && typeof y === 'object' && !Array.isArray(y) && !Object.keys(y).length) continue;
+            out[k] = y;
+        }
+        return out;
+    }
+    return v;
+}
+
+function presetHash(obj) {
+    let h = presetHashCache.get(obj);
+    if (!h) { h = hash(stableJson(lean(obj))); presetHashCache.set(obj, h); }
+    return h;
+}
+
+/** Every character card, keyed `card:<avatar>`. */
+function localCards() {
+    const out = new Map();
+    for (const ch of ctx().characters || []) {
+        if (!ch?.avatar || !/\.png$/i.test(ch.avatar)) continue;
+        out.set(`card:${ch.avatar}`, { key: `card:${ch.avatar}`, type: 'card', avatar: ch.avatar, ch, label: `การ์ด: ${ch.name ?? ch.avatar}` });
+    }
+    return out;
+}
+
+/** Hash of a card's content (its "data"), the same whether read from ST or from an exported PNG. */
+function cardDataHash(card) {
+    const data = structuredClone(card?.data ?? card ?? {});
+    if (data.extensions) delete data.extensions.fav; // per-user, cleared on export
+    return hash(stableJson(lean(data)));
+}
+
+async function localCardHash(item) {
+    const ch = item.ch;
+    const fp = `${ch.date_added}|${ch.data_size}|${ch.json_data?.length ?? ''}`;
+    const known = cardHashCache.get(item.avatar);
+    if (known && known.fp === fp && ch.date_added !== undefined) return known.hash;
+    let json = ch.json_data;
+    if (!json) {
+        const res = await fetch('/api/characters/get', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ avatar_url: item.avatar }) });
+        if (!res.ok) throw new Error(`อ่านการ์ด ${item.avatar} ไม่สำเร็จ (${res.status})`);
+        const full = await res.json();
+        json = full?.json_data ?? JSON.stringify({ data: full?.data ?? {} });
+    }
+    const h = cardDataHash(JSON.parse(json));
+    cardHashCache.set(item.avatar, { fp, hash: h });
+    return h;
+}
+
+const itemHash = item => (item.type === 'preset' ? presetHash(item.obj) : localCardHash(item));
+
+/** The text of a PNG tEXt chunk (SillyTavern keeps the card JSON, base64, under "chara"). */
+async function pngText(blob, keyword) {
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    const view = new DataView(buf.buffer);
+    let pos = 8;
+    while (pos + 8 <= buf.length) {
+        const len = view.getUint32(pos);
+        const type = String.fromCharCode(...buf.subarray(pos + 4, pos + 8));
+        if (type === 'tEXt') {
+            const chunk = buf.subarray(pos + 8, pos + 8 + len);
+            const zero = chunk.indexOf(0);
+            if (zero > 0 && String.fromCharCode(...chunk.subarray(0, zero)) === keyword) {
+                let out = '';
+                for (const b of chunk.subarray(zero + 1)) out += String.fromCharCode(b);
+                return out;
+            }
+        }
+        if (type === 'IEND') break;
+        pos += 12 + len;
+    }
+    return null;
+}
+
+async function cardFromPng(blob) {
+    const b64 = await pngText(blob, 'chara');
+    if (!b64) throw new Error('ไฟล์การ์ดไม่มีข้อมูลตัวละคร');
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+async function downloadItem(entry) {
+    if (entry.type === 'preset') {
+        const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        return { obj, hash: presetHash(obj) };
+    }
+    const blob = await dbxDownloadBlob(`rev:${entry.rev}`);
+    return { blob, hash: cardDataHash(await cardFromPng(blob)) };
+}
+
+async function uploadItem(item, h, rev) {
+    let path, blob;
+    if (item.type === 'preset') {
+        path = presetPath(item.apiId, item.name);
+        blob = new Blob([JSON.stringify(item.obj, null, 4)], { type: 'application/octet-stream' });
+    } else {
+        path = cardPath(item.avatar);
+        const res = await fetch('/api/characters/export', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ format: 'png', avatar_url: item.avatar }) });
+        if (!res.ok) throw new Error(`export การ์ดไม่สำเร็จ (${res.status})`);
+        blob = await res.blob();
+    }
+    let up;
+    try {
+        up = await dbxUpload(path, blob, Date.now(), rev ? { update: rev } : 'add');
+    } catch (e) {
+        if (/conflict/.test(String(e?.message))) throw new Error('ใน Dropbox เพิ่งเปลี่ยน — จะเทียบใหม่รอบหน้า');
+        throw e;
+    }
+    setItemBase(item.key, { rev: up.rev, hash: h });
+}
+
+/** Save a preset file and update ST's in-memory list; re-apply it when it is the one selected. */
+async function applyPreset(apiId, name, obj) {
+    const res = await fetch('/api/presets/save', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ preset: obj, name, apiId }) });
+    if (!res.ok) throw new Error(`บันทึก preset "${name}" ไม่สำเร็จ (${res.status})`);
+    name = (await res.json().catch(() => null))?.name ?? name;
+    const pm = presetManager(apiId);
+    if (!pm?.getPresetList) return;
+    const { presets, preset_names } = pm.getPresetList(apiId);
+    const keyed = Array.isArray(preset_names);
+    let idx = keyed ? preset_names.indexOf(name) : preset_names[name];
+    const asString = typeof presets[idx ?? 0] === 'string';
+    const value = asString ? JSON.stringify(obj) : obj;
+    if (pm.isAdvancedFormatting?.() && obj && typeof obj === 'object') obj.name = name;
+    if (idx !== undefined && idx >= 0) {
+        presets[idx] = value;
+    } else {
+        presets.push(value);
+        idx = presets.length - 1;
+        if (keyed && !pm.isAdvancedFormatting?.()) preset_names[idx] = name;
+        if (!keyed) preset_names[name] = idx;
+        if (pm.select) jQuery(pm.select).append(jQuery('<option></option>', { value: keyed ? name : idx, text: name }));
+    }
+    if (pm.getSelectedPresetName?.() === name) await pm.selectPreset(keyed ? name : String(idx));
+}
+
+/** Import a card PNG over the one with the same file name, keeping this side's last chat and favourite. */
+async function applyCard(avatar, blob, localCh) {
+    const c = ctx();
+    const form = new FormData();
+    form.append('avatar', new File([blob], avatar, { type: 'image/png' }));
+    form.append('file_type', 'png');
+    form.append('preserved_name', avatar);
+    const headers = { ...c.getRequestHeaders() };
+    delete headers['Content-Type'];
+    const res = await fetch('/api/characters/import', { method: 'POST', headers, body: form });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || j?.error) throw new Error(`นำเข้าการ์ด ${avatar} ไม่สำเร็จ (${res.status})`);
+    if (localCh && (localCh.chat || localCh.fav)) {
+        const fav = !!(localCh.fav || localCh.data?.extensions?.fav);
+        await fetch('/api/characters/merge-attributes', {
+            method: 'POST', headers: c.getRequestHeaders(),
+            body: JSON.stringify({ avatar, ...(localCh.chat ? { chat: localCh.chat } : {}), fav, data: { extensions: { fav } } }),
+        }).catch(() => null);
+    }
+    cardHashCache.delete(avatar);
+}
+
+async function applyItem(entry, content, local) {
+    if (entry.type === 'preset') await applyPreset(entry.apiId, entry.name, content.obj);
+    else await applyCard(entry.avatar, content.blob, local?.ch);
+}
+
+/** After cards changed: reload ST's character list and remember what this side now has. */
+async function refreshCardsAfter(applied) {
+    if (!applied.length) return;
+    try { await ctx().getCharacters?.(); } catch (e) { console.warn(LOG, e); }
+    const now = localCards();
+    for (const { key, rev } of applied) {
+        const item = now.get(key);
+        // ST may tidy a card on import; take its own reading as the matched state.
+        if (item) { try { setItemBase(key, { rev, hash: await localCardHash(item) }); } catch { /* next round */ } }
+    }
+}
+
+/**
+ * Sync presets and cards with Dropbox (run inside the Dropbox lock, before chats so that
+ * new characters exist when their chats arrive). auto: stop after ~15 s, continue next round.
+ */
+async function syncItems(entries, out, { auto = false } = {}) {
+    const d = dbxSettings();
+    const doPresets = d.syncPresets !== false, doCards = d.syncCards !== false;
+    if (!doPresets && !doCards) return;
+    const remote = new Map();
+    for (const e of entries) {
+        const parts = String(e.path_display || '').split('/').filter(Boolean);
+        if (doPresets && parts[0] === 'presets' && parts.length === 3 && PRESET_APIS.includes(parts[1]) && /\.json$/i.test(parts[2])) {
+            const name = dbxUnseg(parts[2].replace(/\.json$/i, ''));
+            remote.set(`p:${parts[1]}:${name}`, { ...e, type: 'preset', apiId: parts[1], name, label: `${PRESET_LABEL[parts[1]]}: ${name}` });
+        } else if (doCards && parts[0] === 'cards' && parts.length === 2 && /\.png$/i.test(parts[1])) {
+            const avatar = dbxUnseg(parts[1]);
+            remote.set(`card:${avatar}`, { ...e, type: 'card', avatar, label: `การ์ด: ${avatar.replace(/\.png$/i, '')}` });
+        }
+    }
+    const local = new Map([...(doPresets ? localPresets() : []), ...(doCards ? localCards() : [])]);
+    const keys = [...new Set([...remote.keys(), ...local.keys()])];
+    const deadline = auto ? Date.now() + 15_000 : Infinity;
+    const cardsApplied = [];
+    for (let i = 0; i < keys.length && Date.now() < deadline; i++) {
+        const key = keys[i];
+        const L = local.get(key), R = remote.get(key), B = itemBase(key);
+        const label = (L || R).label;
+        sync.progress = `กำลังตรวจ preset/การ์ด ${i + 1}/${keys.length}…`;
+        renderSyncStatus();
+        try {
+            if (!R) {
+                // Not in Dropbox yet (or deleted there): send it.
+                await uploadItem(L, await itemHash(L), null);
+                out.itemsSent++;
+                continue;
+            }
+            if (B && B.rev === R.rev) {
+                if (!L) continue; // removed here; deletions of presets/cards are not synced
+                const lh = await itemHash(L);
+                if (lh !== B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; }
+                continue;
+            }
+            const waiting = sync.decisions.find(x => x.kind === 'item' && x.t.key === key && x.rev === R.rev);
+            if (waiting && auto) { out.decisions.push(waiting); continue; }
+            const content = await downloadItem(R);
+            const lh = L ? await itemHash(L) : null;
+            if (lh === content.hash) { setItemBase(key, { rev: R.rev, hash: lh }); continue; }
+            if (!L || (B && lh === B.hash)) {
+                await applyItem(R, content, L);
+                setItemBase(key, { rev: R.rev, hash: content.hash });
+                if (R.type === 'card') cardsApplied.push({ key, rev: R.rev });
+                out.itemsApplied.push(label);
+                continue;
+            }
+            if (B && content.hash === B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; continue; }
+            out.decisions.push({
+                kind: 'item', t: { key, label, chatId: '' }, rev: R.rev, entry: R, item: L,
+                when: Date.parse(R.client_modified) || Date.parse(R.server_modified) || 0,
+                local: { count: 0 }, remote: { count: 0 },
+            });
+        } catch (e) {
+            console.warn(LOG, 'item sync', key, e);
+            out.errors.push(`${label}: ${e?.message ?? e}`);
+            if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
+        }
+    }
+    await refreshCardsAfter(cardsApplied);
+}
+
+/** "Use Dropbox's" / "use this side's" / (presets) "keep both" for an item changed on both sides. */
+async function resolveItem(x, how) {
+    const key = x.t.key;
+    if (how === 'local') {
+        const item = (x.item.type === 'preset' ? localPresets() : localCards()).get(key);
+        if (!item) throw new Error('ไม่มีในเครื่องนี้แล้ว');
+        await uploadItem(item, await itemHash(item), x.rev);
+        return;
+    }
+    const content = await downloadItem(x.entry);
+    if (how === 'both') {
+        const copy = `${x.entry.name} (Dropbox)`;
+        await applyPreset(x.entry.apiId, copy, structuredClone(content.obj));
+        const presets = localPresets();
+        const copied = presets.get(`p:${x.entry.apiId}:${copy}`);
+        if (copied) await uploadItem(copied, presetHash(copied.obj), itemBase(copied.key)?.rev ?? null);
+        const item = presets.get(key);
+        if (item) await uploadItem(item, presetHash(item.obj), x.rev);
+        return copy;
+    }
+    await applyItem(x.entry, content, x.item);
+    setItemBase(key, { rev: x.rev, hash: content.hash });
+    if (x.entry.type === 'card') await refreshCardsAfter([{ key, rev: x.rev }]);
 }
 
 // ---------------------------------------------------------------- leftovers from Pocky chat vault
