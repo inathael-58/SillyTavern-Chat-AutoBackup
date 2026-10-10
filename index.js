@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.2.0'; // keep in sync with manifest.json
+const VERSION = '2.3.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1391,7 +1391,7 @@ function renderSettings() {
                     <b>ซิงค์แชทระหว่างเครื่อง</b>
                     <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
                     <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
-                    <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแชทแล้วลบใน Dropbox และเครื่องอื่นด้วย</label>
+                    <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแล้วลบใน Dropbox และเครื่องอื่นด้วย (แชท, Quick Reply, regex)</label>
                     <label class="checkbox_label" title="preset ทุกประเภทที่ ST จัดการ (Chat/Text Completion, Instruct, Context, System Prompt, Reasoning…) ถ้า preset ที่เลือกใช้อยู่ถูกอัปเดตจากอีกเครื่อง จะโหลดค่าใหม่ให้"><input type="checkbox" id="cab_sync_presets"> ซิงค์ preset ด้วย</label>
                     <label class="checkbox_label" title="lorebook (World Info) ที่เป็นไฟล์แยก ถ้าเปิด lorebook นั้นค้างไว้ในหน้าแก้ จะโหลดฉบับใหม่ให้"><input type="checkbox" id="cab_sync_worlds"> ซิงค์ lorebook ด้วย</label>
                     <label class="checkbox_label" title="ชื่อ คำอธิบาย ตำแหน่ง/ความลึก lorebook ที่ผูกไว้ การผูกกับตัวละคร และรูป persona (การเปลี่ยนแค่รูปจะไปพร้อมการแก้ครั้งถัดไป)"><input type="checkbox" id="cab_sync_personas"> ซิงค์ persona ด้วย</label>
@@ -2750,6 +2750,7 @@ const SYNC_KIND = {
     gone: { title: 'แชทนี้ถูกลบในเครื่องนี้', why: 'เคยซิงค์แชทนี้แล้ว แต่ตอนนี้ไม่มีในเซิร์ฟเวอร์นี้ (ลบหรือเปลี่ยนชื่อ)' },
     new: { title: 'มีบน Dropbox แต่ไม่มีในเครื่องนี้', why: 'แชทที่สร้างจากเครื่องอื่นก่อนเริ่มใช้การซิงค์ที่นี่ หรือเคยลบไปแล้ว' },
     deleted: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบแชทนี้แล้ว แต่ที่นี่มีการแก้หลังซิงค์ครั้งล่าสุด หรือเปิดแชทนี้อยู่' },
+    itemdel: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบไปแล้ว แต่ที่นี่มีการแก้หลังซิงค์ครั้งล่าสุด (หรือยังไม่เคยซิงค์)' },
     item: { title: 'แก้ทั้งสองฝั่ง', why: 'แก้ทั้งในเครื่องนี้และจากอีกเครื่อง หลังจากซิงค์กันครั้งล่าสุด (หรือเพิ่งเริ่มซิงค์และสองฝั่งไม่ตรงกัน)' },
 };
 
@@ -2782,6 +2783,17 @@ function showSyncDecisions() {
         const items = sync.decisions;
         wrap.querySelector('#cab_sync_list').innerHTML = items.map((x, i) => {
             const k = SYNC_KIND[x.kind] ?? SYNC_KIND.conflict;
+            if (x.kind === 'itemdel') {
+                return `
+            <section class="cab_problem">
+                <h4>${escapeHtml(x.t.label)}</h4>
+                <p><b>${escapeHtml(k.title)}</b> · ${escapeHtml(k.why)}</p>
+                <div class="cab_buttons">
+                    <div class="menu_button cab_primary" data-i="${i}" data-a="idellocal">ลบในเครื่องนี้ด้วย</div>
+                    <div class="menu_button" data-i="${i}" data-a="ikeep">เก็บไว้ (ส่งกลับขึ้น Dropbox)</div>
+                </div>
+            </section>`;
+            }
             if (x.kind === 'item') {
                 const btnsI = [['iremote', 'ใช้ฉบับ Dropbox', true], ['ilocal', 'ใช้ฉบับในเครื่อง'], ...(x.entry.type === 'preset' ? [['iboth', 'เก็บทั้งคู่']] : [])];
                 return `
@@ -2823,7 +2835,17 @@ function showSyncDecisions() {
             const item = items[Number(btn.dataset.i)];
             btn.addEventListener('click', act(btn, async () => {
                 const a = btn.dataset.a;
-                if (a === 'iremote') {
+                if (a === 'idellocal' || a === 'ikeep') {
+                    const fresh = (await localItemsOf(item.item.type)).get(item.t.key);
+                    if (!fresh) throw new Error('ไม่มีในเครื่องนี้แล้ว');
+                    if (a === 'idellocal') {
+                        if (!confirm(`ลบ "${item.t.label}" ในเครื่องนี้ด้วย?`)) return;
+                        await deleteItemLocally(fresh);
+                        setItemBase(item.t.key, { deleted: true, rev: item.rev });
+                    } else {
+                        await keepDeletedItem(fresh);
+                    }
+                } else if (a === 'iremote') {
                     if (!confirm(`ใช้ฉบับ Dropbox แทน "${item.t.label}" ในเครื่องนี้?`)) return;
                     await resolveItem(item, 'remote');
                 } else if (a === 'ilocal') {
@@ -3151,6 +3173,85 @@ function applyRegex(id, obj) {
     ctx().saveSettingsDebounced();
 }
 
+// Items whose deletion is synced (a marker under /deleted/, like chats).
+const DELETABLE = { qr: 'quickreplies', rx: 'regex' };
+const itemTombPath = item => `/deleted/${DELETABLE[item.type]}/${dbxSeg(item.type === 'qr' ? item.name : item.id)}.json`;
+const itemPathOf = item => (item.type === 'qr' ? quickReplyPath(item.name) : regexPath(item.id));
+
+/** Delete a Quick Reply set or regex script here because another device deleted it. */
+async function deleteItemLocally(item) {
+    if (item.type === 'qr') {
+        const res = await fetch('/api/quick-replies/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ name: item.name }) });
+        if (!res.ok) throw new Error(`ลบ Quick Reply "${item.name}" ไม่สำเร็จ (${res.status})`);
+        if (!qrReloadNeeded) {
+            qrReloadNeeded = true;
+            toast.info('Quick Reply เปลี่ยนจากอีกเครื่อง — แตะที่นี่เพื่อโหลดหน้าใหม่ให้ใช้ได้', 'ซิงค์', {
+                timeOut: 0, extendedTimeOut: 0, closeButton: true, onclick: () => location.reload(),
+            });
+        }
+    } else {
+        const ext = ctx().extensionSettings;
+        ext.regex = (ext.regex || []).filter(x => x?.id !== item.id);
+        ctx().saveSettingsDebounced();
+    }
+}
+
+/** Deleted here: take it out of Dropbox and leave a marker for the other devices. */
+async function deleteItemEverywhere(item) {
+    const marker = new Blob([JSON.stringify({ deleted: new Date().toISOString() })], { type: 'application/octet-stream' });
+    const up = await dbxUpload(itemTombPath(item), marker, Date.now(), 'overwrite');
+    try { await dbxRpc('files/delete_v2', { path: itemPathOf(item) }); } catch (e) {
+        if (!/not_found/.test(String(e?.message))) throw e;
+    }
+    setItemBase(item.key, { deleted: true, rev: up.rev });
+}
+
+/** Deleted elsewhere, but keep it: put it back and drop the marker. */
+async function keepDeletedItem(item) {
+    await uploadItem(item, await itemHash(item), null);
+    try { await dbxRpc('files/delete_v2', { path: itemTombPath(item) }); } catch { /* already gone */ }
+}
+
+// Regex scripts run in list order; the order travels as a list of ids in /regexorder.json.
+const REGEX_ORDER_PATH = '/regexorder.json';
+const regexIds = () => (ctx().extensionSettings?.regex || []).map(x => x?.id).filter(Boolean);
+
+/** Put the local scripts in Dropbox's order; scripts Dropbox doesn't list keep their place at the end. */
+function applyRegexOrder(ids) {
+    const ext = ctx().extensionSettings;
+    if (!Array.isArray(ext.regex)) return;
+    const pos = new Map(ids.map((id, i) => [id, i]));
+    const before = regexIds().join('\n');
+    ext.regex = ext.regex.map((x, i) => [x, i])
+        .sort((a, b) => (pos.get(a[0]?.id) ?? Infinity) - (pos.get(b[0]?.id) ?? Infinity) || a[1] - b[1])
+        .map(([x]) => x);
+    if (regexIds().join('\n') !== before) ctx().saveSettingsDebounced();
+}
+
+async function syncRegexOrder(entry, out) {
+    if (!Array.isArray(ctx().extensionSettings?.regex)) return;
+    const key = 'rxorder';
+    const B = itemBase(key);
+    const send = async rev => {
+        const ids = regexIds();
+        const up = await dbxUpload(REGEX_ORDER_PATH, new Blob([JSON.stringify(ids)], { type: 'application/octet-stream' }), Date.now(), rev ? { update: rev } : 'add');
+        setItemBase(key, { rev: up.rev, hash: hash(ids.join('\n')) });
+    };
+    const lh = hash(regexIds().join('\n'));
+    if (!entry) { if (regexIds().length) await send(null); return; }
+    if (B && B.rev === entry.rev) { if (lh !== B.hash) await send(entry.rev); return; }
+    const ids = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+    const rh = hash((Array.isArray(ids) ? ids : []).join('\n'));
+    if (lh !== rh) {
+        // Dropbox's order wins unless only this side reordered since the last match.
+        applyRegexOrder(Array.isArray(ids) ? ids : []);
+        if (hash(regexIds().join('\n')) !== lh) out.itemsApplied.push('ลำดับ regex');
+    }
+    const now = hash(regexIds().join('\n'));
+    if (now === rh) setItemBase(key, { rev: entry.rev, hash: rh });
+    else { setItemBase(key, { rev: entry.rev, hash: rh }); await send(entry.rev); } // this side has scripts Dropbox's list lacks
+}
+
 async function localItemsOf(type) {
     return type === 'preset' ? localPresets() : type === 'card' ? localCards()
         : type === 'persona' ? localPersonas() : type === 'qr' ? await localQuickReplies()
@@ -3311,6 +3412,8 @@ async function syncItems(entries, out, { auto = false } = {}) {
     const doQr = d.syncQuickReplies !== false && !qrReloadNeeded, doRegex = d.syncRegex !== false;
     if (!doPresets && !doCards && !doWorlds && !doPersonas && !doQr && !doRegex) return;
     const remote = new Map();
+    const tombs = new Map(); // deletion markers (Quick Reply, regex)
+    let regexOrder = null;
     for (const e of entries) {
         const parts = String(e.path_display || '').split('/').filter(Boolean);
         if (doPresets && parts[0] === 'presets' && parts.length === 3 && PRESET_APIS.includes(parts[1]) && /\.json$/i.test(parts[2])) {
@@ -3331,6 +3434,12 @@ async function syncItems(entries, out, { auto = false } = {}) {
         } else if (doRegex && parts[0] === 'regex' && parts.length === 2 && /\.json$/i.test(parts[1])) {
             const id = dbxUnseg(parts[1].replace(/\.json$/i, ''));
             remote.set(`rx:${id}`, { ...e, type: 'rx', id, label: `Regex: ${id}` });
+        } else if (parts[0] === 'deleted' && parts.length === 3 && /\.json$/i.test(parts[2])) {
+            const v = dbxUnseg(parts[2].replace(/\.json$/i, ''));
+            if (doQr && parts[1] === 'quickreplies') tombs.set(`qr:${v}`, { ...e, type: 'qr', name: v, label: `Quick Reply: ${v}` });
+            if (doRegex && parts[1] === 'regex') tombs.set(`rx:${v}`, { ...e, type: 'rx', id: v, label: `Regex: ${v}` });
+        } else if (doRegex && parts.length === 1 && parts[0] === 'regexorder.json') {
+            regexOrder = e;
         }
     }
     const local = new Map([
@@ -3339,25 +3448,50 @@ async function syncItems(entries, out, { auto = false } = {}) {
         ...(doQr ? await localQuickReplies() : []), ...(doRegex ? localRegex() : []),
     ]);
     // Quick Reply module unreachable (or waiting for a reload): leave Dropbox's sets alone.
-    if (doQr && !(await quickReplySets())) for (const k of [...remote.keys()]) if (k.startsWith('qr:')) remote.delete(k);
-    const keys = [...new Set([...remote.keys(), ...local.keys()])];
+    const qrReachable = doQr && !!(await quickReplySets());
+    if (doQr && !qrReachable) for (const map of [remote, tombs]) for (const k of [...map.keys()]) if (k.startsWith('qr:')) map.delete(k);
+    // Only trust "missing here" as a deletion when the local list could really be read.
+    const deletesOn = d.syncDeletes !== false;
+    const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex) : false);
+    const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])];
     const deadline = auto ? Date.now() + 15_000 : Infinity;
     const cardsApplied = [];
     for (let i = 0; i < keys.length && Date.now() < deadline; i++) {
         const key = keys[i];
-        const L = local.get(key), R = remote.get(key), B = itemBase(key);
-        const label = (L || R).label;
+        const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
+        const label = (L || R || T).label;
         sync.progress = `กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`;
         renderSyncStatus();
         try {
+            if (!R && T) {
+                // Deleted on another device.
+                if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
+                if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
+                if (B && !B.deleted && (await itemHash(L)) === B.hash) {
+                    await deleteItemLocally(L);
+                    setItemBase(key, { deleted: true, rev: T.rev });
+                    out.itemsApplied.push(`ลบ ${label}`);
+                    continue;
+                }
+                const waitingDel = sync.decisions.find(x => x.kind === 'itemdel' && x.t.key === key && x.rev === T.rev);
+                if (!waitingDel || !auto) {
+                    out.decisions.push({ kind: 'itemdel', t: { key, label, chatId: '' }, rev: T.rev, item: L, when: Date.parse(T.server_modified) || 0, local: { count: 0 }, remote: { count: 0 } });
+                } else out.decisions.push(waitingDel);
+                continue;
+            }
             if (!R) {
+                if (!L) continue;
                 // Not in Dropbox yet (or deleted there): send it.
                 await uploadItem(L, await itemHash(L), null);
                 out.itemsSent++;
                 continue;
             }
             if (B && B.rev === R.rev) {
-                if (!L) continue; // removed here; deletions of presets/cards are not synced
+                if (!L) {
+                    // Deleted here since the last match.
+                    if (DELETABLE[R.type] && deletesOn && listedHere(R.type)) { await deleteItemEverywhere({ ...R, key }); out.itemsSent++; }
+                    continue;
+                }
                 const lh = await itemHash(L);
                 if (lh !== B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; }
                 continue;
@@ -3389,6 +3523,9 @@ async function syncItems(entries, out, { auto = false } = {}) {
         }
     }
     await refreshCardsAfter(cardsApplied);
+    if (doRegex && Date.now() < deadline) {
+        try { await syncRegexOrder(regexOrder, out); } catch (e) { out.errors.push(`ลำดับ regex: ${e?.message ?? e}`); }
+    }
 }
 
 /** "Use Dropbox's" / "use this side's" / (presets) "keep both" for an item changed on both sides. */
