@@ -138,6 +138,7 @@
 #cab_indicator.cab_dragging { cursor: grabbing; transition: none; }
 
 #cab_indicator[data-state="waiting"] { color: color-mix(in srgb, var(--cab-fg) 65%, transparent); }
+#cab_indicator[data-state="fresh"] { color: color-mix(in srgb, var(--cab-fg) 50%, transparent); border-style: dashed; }
 #cab_indicator[data-state="attention"] {
     font-weight: 700;
     border-color: var(--cab-fg);

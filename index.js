@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.4.0'; // keep in sync with manifest.json
+const VERSION = '2.5.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -481,9 +481,26 @@ function captureNow() {
         sigs,
         hash: sigHash(sigs),
         count: messages.length,
+        greetingOnly: isGreetingOnly(messages, c.chatMetadata ?? c.chat_metadata, info),
         ...lastMsgInfo(messages[messages.length - 1]),
         ts: Date.now(),
     };
+}
+
+/**
+ * A chat holding nothing but its opening message(s) — the greeting, or one per member
+ * in a group — and nothing the user wrote. Not worth a backup until the chat starts.
+ * Memory Hub's "continue in a new chat" also opens with a single carried message, but
+ * brings the story's memory along: that one is a real chat.
+ */
+function isGreetingOnly(messages, meta, info) {
+    const mh = meta?.memory_hub;
+    if (mh && ((Array.isArray(mh.chain) && mh.chain.length) || (Array.isArray(mh.memories) && mh.memories.length) || String(mh.overview ?? '').trim())) return false;
+    if (messages.some(m => m?.is_user)) return false;
+    const members = info.type === 'group'
+        ? ((ctx().groups || []).find(g => String(g.id) === String(info.groupId))?.members?.length || 1)
+        : 1;
+    return messages.filter(m => !m?.is_system).length <= members;
 }
 
 // ---------------------------------------------------------------- core backup logic
@@ -493,6 +510,7 @@ let pendingTimer = null;
 let writing = Promise.resolve();
 const lastHashByKey = new Map();
 const inflightByKey = new Map(); // key -> number of writes queued/running
+const greetingOnlyKeys = new Set(); // chats not backed up yet because they hold only the greeting
 let lastError = null;            // { key, message } of the most recent failed write
 
 function schedule() {
@@ -543,6 +561,15 @@ async function store(snap, { force = false, reason = 'auto' } = {}) {
         lastHashByKey.set(info.key, snap.hash);
         return { skipped: true };
     }
+
+    // A fresh chat with only its greeting: nothing to lose yet. Once a chat has a backup it
+    // keeps getting one, so trimming a chat back to its greeting is still recorded.
+    if (!force && snap.greetingOnly && !existing.length) {
+        greetingOnlyKeys.add(info.key);
+        lastHashByKey.set(info.key, snap.hash);
+        return { skipped: true, greetingOnly: true };
+    }
+    greetingOnlyKeys.delete(info.key);
 
     const s = settings();
     let mergeInto = null;
@@ -855,6 +882,7 @@ async function renderBrowser() {
                         ${m.shrunk ? '<span class="cab_tag cab_warn" title="แชทสั้นลงผิดปกติเมื่อเทียบกับ backup ก่อนหน้า">สั้นลง</span>' : ''}
                         ${m.cloud && m.source !== 'dropbox' ? `<span class="cab_tag cab_db_tag" title="ส่งขึ้น Dropbox แล้วเมื่อ ${fmtTime(m.cloud)}">Dropbox</span>` : ''}
                         ${m.reason === 'manual' ? '<span class="cab_tag">manual</span>' : ''}
+                        ${m.reason === 'manager' ? '<span class="cab_tag" title="แชทถูกแก้จาก Chat Browser (เช่น ผูกภาคต่อ หรือเปลี่ยนชื่อแชทที่อ้างถึง)">Chat Browser</span>' : ''}
                         ${m.reason === 'sync' ? (m.source === 'before-delete'
                             ? '<span class="cab_tag" title="ฉบับในเครื่องก่อนถูกลบตามอีกเครื่อง">ก่อนลบ</span>'
                             : m.source === 'before-sync'
@@ -1083,6 +1111,9 @@ async function updateIndicator() {
     } else if (peak && peak.count >= 6 && count < peak.count * 0.6) {
         state = 'attention'; label = 'Attention!'; num = lastId(peak);
         tip = `แชทบนจอมี ${count} ข้อความ แต่ backup มีถึง ${peak.count} ข้อความ (${fmtTime(peak.ts)}) — แชทอาจหาย/ไม่ครบ`;
+    } else if (!newest && !busy && greetingOnlyKeys.has(info.key)) {
+        state = 'fresh'; label = 'New'; num = '';
+        tip = 'แชทใหม่ที่มีแค่ข้อความทักทาย — ยังไม่ backup จะเริ่มเมื่อส่งข้อความแรก';
     } else if (busy || !newest || lastHashByKey.get(info.key) !== newest.hash) {
         state = 'waiting'; label = 'Waiting...'; num = lastId(newest);
         tip = newest
@@ -1094,7 +1125,7 @@ async function updateIndicator() {
     }
 
     el.dataset.state = state;
-    const parts = [document.createTextNode(`${label} ${num}`)];
+    const parts = [document.createTextNode(`${label} ${num}`.trim())];
     const db = dropboxStateFor(info.key, list);
     const dbStyle = dbxSettings().indicatorStyle;
     if (db && dbStyle !== 'off') {
@@ -1529,6 +1560,7 @@ function wireEvents() {
     for (const ev of [...new Set(changeEvents)]) eventSource.on(ev, () => schedule());
     if (E.CHAT_DELETED) eventSource.on(E.CHAT_DELETED, name => { onChatDeleted('character', name); });
     if (E.GROUP_CHAT_DELETED) eventSource.on(E.GROUP_CHAT_DELETED, name => { onChatDeleted('group', name); });
+    if (E.CHAT_RENAMED) eventSource.on(E.CHAT_RENAMED, data => { onChatRenamed(data).catch(e => console.warn(LOG, 'rename', e)); });
 
     if (E.CHAT_CHANGED) {
         eventSource.on(E.CHAT_CHANGED, async () => {
@@ -2322,7 +2354,7 @@ async function writeServerChat(t, remote, local, chatMeta = remote.head?.chat_me
 }
 
 /** Keep `text` as a snapshot of the chat (skipped when identical to one already kept). */
-async function addSnapshotText(t, text, { source, cloud: cloudTs = 0, ts = Date.now() } = {}) {
+async function addSnapshotText(t, text, { source, reason = 'sync', cloud: cloudTs = 0, ts = Date.now() } = {}) {
     const d = deriveFromJsonl(text);
     if (!d.count) return null;
     const same = (await dbMetaByKey(t.key)).find(m => m.hash === d.hash);
@@ -2335,7 +2367,7 @@ async function addSnapshotText(t, text, { source, cloud: cloudTs = 0, ts = Date.
         key: t.key, type: t.type, chatId: t.chatId, groupId: t.groupId, avatar: t.avatar, label: t.label,
         ts, hash: d.hash, count: d.count, preview: d.preview, previewName: d.previewName, swipe: d.swipe,
         rawSize: text.length, size: packed.enc === 'gzip' ? packed.data.size : text.length,
-        reason: 'sync', source, shrunk: false, mergedSwipes: 0, sv: SNAP_VERSION,
+        reason, source, shrunk: false, mergedSwipes: 0, sv: SNAP_VERSION,
     };
     if (cloudTs) meta.cloud = cloudTs;
     const id = await dbAdd(meta, packed, d.sigs);
@@ -2418,7 +2450,11 @@ async function syncClassifyDeleted(f, t) {
     if (t.missing) return done();
     const local = chatState(await serverChat(t));
     if (!local.count) return done();
-    const untouched = base && !base.deleted && !base.skipped && base.sig === local.sig && metaEq(base.meta, local.meta);
+    let untouched = base && !base.deleted && !base.skipped && base.sig === local.sig && metaEq(base.meta, local.meta);
+    if (!untouched) {
+        // Markers from Clean Sync or a rename carry the deleted copy's messages: same here = nothing lost.
+        try { untouched = !!local.sig && JSON.parse(await dbxDownloadText(`rev:${f.rev}`))?.sig === local.sig; } catch { /* older marker */ }
+    }
     const isOpen = currentChatInfo()?.key === t.key;
     return {
         t, rev: f.rev, path: f.path_lower, when: Date.parse(f.server_modified) || 0,
@@ -2502,10 +2538,12 @@ async function markKeySent(key) {
  * Delete a chat from Dropbox and leave a marker so the other devices delete it too
  * (Dropbox keeps deleted files ~30 days; this device keeps its snapshots).
  */
-async function syncDeleteEverywhere(t) {
-    const marker = new Blob([JSON.stringify({ deleted: new Date().toISOString(), chat: t.chatId })], { type: 'application/octet-stream' });
+async function syncDeleteEverywhere(t, { path = dbxPathOf(t), note = {} } = {}) {
+    // note.sig: messages of the deleted copy. A device whose chat still matches it removes
+    // that chat without asking, even if it never synced the chat before.
+    const marker = new Blob([JSON.stringify({ deleted: new Date().toISOString(), chat: t.chatId, ...note })], { type: 'application/octet-stream' });
     const up = await dbxUpload(dbxTombPathOf(t), marker, Date.now(), 'overwrite');
-    try { await dbxRpc('files/delete_v2', { path: dbxPathOf(t) }); } catch (e) {
+    try { await dbxRpc('files/delete_v2', { path }); } catch (e) {
         if (!/not_found/.test(String(e?.message))) throw e;
     }
     setSyncBase(t.key, { deleted: true, rev: up.rev });
@@ -2578,6 +2616,302 @@ async function onChatDeleted(type, name) {
             toast.warn(`ลบ "${chatId}" ออกจาก Dropbox ไม่สำเร็จ: ${e?.message ?? e}`, 'ซิงค์');
         }
     }
+}
+
+/**
+ * A chat was renamed in ST (its own rename, or Chat Browser's). Snapshots follow the new
+ * name, and in Dropbox the file moves: uploaded under the new name, the old one deleted
+ * with a marker, so the other devices drop their old copy (if it holds nothing more) and
+ * create the renamed one.
+ */
+async function onChatRenamed({ avatarId, groupId, oldFileName, newFileName } = {}) {
+    const strip = n => String(n ?? '').replace(/\.jsonl$/i, '');
+    const oldId = strip(oldFileName), newId = strip(newFileName);
+    const type = groupId ? 'group' : 'character';
+    const entity = String(groupId || avatarId || '');
+    if (!oldId || !newId || oldId === newId || !entity) return;
+    await flush(); // a pending snapshot under the old name lands before it is moved
+    const oldT = syncTargetOf(type, entity, oldId);
+    const newT = syncTargetOf(type, entity, newId);
+    await rekeySnapshots(oldT.key, newT);
+    updateIndicator();
+    if (!dbxConnected()) return;
+    try {
+        const r = await withCloudLock(() => renameInDropbox(oldT, newT));
+        if (r?.busy) throw new Error('Dropbox ไม่ว่าง');
+    } catch (e) {
+        console.warn(LOG, 'rename sync', e);
+        toast.warn(`ย้ายแชท "${oldId}" ไปชื่อใหม่ใน Dropbox ไม่สำเร็จ: ${e?.message ?? e}`, 'ซิงค์');
+    }
+}
+
+async function rekeySnapshots(oldKey, newT) {
+    const list = await dbMetaByKey(oldKey);
+    if (list.length) {
+        const d = await db();
+        const tx = d.transaction(META, 'readwrite');
+        for (const m of list) tx.objectStore(META).put({ ...m, key: newT.key, chatId: newT.chatId });
+        await txDone(tx);
+    }
+    if (lastHashByKey.has(oldKey)) { lastHashByKey.set(newT.key, lastHashByKey.get(oldKey)); lastHashByKey.delete(oldKey); }
+    if (greetingOnlyKeys.delete(oldKey)) greetingOnlyKeys.add(newT.key);
+    try {
+        const all = cloudRecords();
+        if (all[oldKey]) { all[newT.key] = all[oldKey]; delete all[oldKey]; localStorage.setItem('cab_cloud_state', JSON.stringify(all)); }
+    } catch { /* ignore */ }
+}
+
+async function renameInDropbox(oldT, newT) {
+    const arr = newT.missing ? [] : await serverChat(newT);
+    const st = chatState(arr);
+    const old = await dbxMetadata(dbxPathOf(oldT));
+    if (st.count && (old || syncBase(oldT.key) || (await dbMetaByKey(newT.key)).some(m => m.cloud))) {
+        const now = Date.now();
+        const up = await dbxUpload(dbxPathOf(newT), new Blob([toJsonl(arr)], { type: 'application/octet-stream' }), now, 'overwrite');
+        try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(newT) }); } catch { /* no marker */ }
+        setSyncBase(newT.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+        setCloudRecord(newT.key, { ts: now, count: st.count });
+        await markKeySent(newT.key);
+    }
+    if (!old) { setSyncBase(oldT.key, null); return; }
+    if (dbxSettings().syncSince) {
+        await syncDeleteEverywhere(oldT, { path: old.path_display || dbxPathOf(oldT), note: { renamedTo: newT.chatId, sig: st.sig } });
+    } else {
+        // Backup only (never synced): nothing on other devices to tell, just move the file.
+        try { await dbxRpc('files/delete_v2', { path: old.path_display || dbxPathOf(oldT) }); } catch { /* gone */ }
+        setSyncBase(oldT.key, null);
+    }
+}
+
+/**
+ * Something other than the open chat changed a chat file on this server (e.g. Chat Browser
+ * fixed a story link in its metadata): keep a snapshot of it and send it to Dropbox.
+ * chat: { type: 'character'|'group', avatar | groupId, chatId }
+ */
+async function noteServerChange(chat) {
+    const t = syncTargetOf(chat.type, chat.type === 'group' ? chat.groupId : chat.avatar, chat.chatId);
+    if (t.missing) return false;
+    if (currentChatInfo()?.key === t.key) { schedule(); return true; }
+    const arr = await serverChat(t);
+    if (!chatState(arr).count) return false;
+    await addSnapshotText(t, toJsonl(arr), { source: 'manager', reason: 'manager' });
+    cloudSoon();
+    return true;
+}
+
+// ---------------------------------------------------------------- Clean Sync
+//
+// Make Dropbox — and through it every other device — hold exactly the chats this device
+// has. First a normal send + sync (so a chat just made on another device is fetched, not
+// deleted), then:
+//   in Dropbox, not here            → deleted from Dropbox with a marker; the other devices delete theirs
+//   here, deleted on another device → kept: sent back up, the marker removed
+//   here, never sent to Dropbox     → sent up, so the other devices create it
+// Chats are the only thing it touches. Every deletion is logged on this device with the
+// Dropbox revision, so it can be restored for as long as Dropbox keeps deleted files (~30 days).
+
+const CLEAN_LOG_DAYS = 35;
+function cleanLogKey() { return `cab_clean_log:${dbxSettings().appKey || ''}`; }
+function cleanLog() {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem(cleanLogKey()) || '[]') || []; } catch { /* ignore */ }
+    const since = Date.now() - CLEAN_LOG_DAYS * 86_400_000;
+    return list.filter(e => e && e.ts >= since);
+}
+function saveCleanLog(list) {
+    try { localStorage.setItem(cleanLogKey(), JSON.stringify(list)); } catch { /* storage unavailable */ }
+}
+
+/** Every chat on this server: key → { t, count } (one request on ST 1.13+, one per character before). */
+async function serverChatList() {
+    const c = ctx();
+    const out = new Map();
+    const add = (type, entity, file, count) => {
+        const t = syncTargetOf(type, entity, String(file ?? '').replace(/\.jsonl$/i, ''));
+        if (!t.missing && t.chatId) out.set(t.key, { t, count: Number(count) || 0 });
+    };
+    const res = await fetch('/api/chats/recent', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify({}), cache: 'no-cache' });
+    if (res.ok) {
+        for (const x of await res.json()) {
+            if (x?.group) add('group', x.group, x.file_name, x.chat_items);
+            else if (x?.avatar) add('character', x.avatar, x.file_name, x.chat_items);
+        }
+        return out;
+    }
+    for (const ch of c.characters || []) {
+        const r = await fetch('/api/characters/chats', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify({ avatar_url: ch.avatar }) });
+        const list = r.ok ? await r.json() : [];
+        if (Array.isArray(list)) for (const x of list) add('character', ch.avatar, x.file_name, x.chat_items);
+    }
+    for (const g of c.groups || []) for (const id of g.chats || []) add('group', g.id, id, 0);
+    return out;
+}
+
+/**
+ * Step 1: send what is pending, run a normal sync, then work out what Clean Sync would do.
+ * Nothing is deleted here. progress(text) reports each stage.
+ */
+async function cleanSyncPlan(progress) {
+    if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
+    progress?.('กำลังส่งแชทที่ค้างขึ้น Dropbox…');
+    await flush();
+    await cloudTick({ ignoreGap: true });
+    progress?.('กำลังซิงค์ตามปกติก่อน…');
+    const pulled = await syncPull({});
+    if (pulled?.busy) throw new Error('Dropbox กำลังทำงานอื่นอยู่ — ลองอีกครั้งในอีกสักครู่');
+    syncReport(pulled, { quiet: true });
+    progress?.('กำลังเทียบรายชื่อแชท…');
+    const local = await serverChatList();
+    const localLower = new Set([...local.keys()].map(k => k.toLowerCase()));
+    const files = await listChatFiles();
+    const remove = [], keep = [], upload = [];
+    const inDropbox = new Set(), tombs = new Set();
+    for (const f of files) {
+        const parts = String(f.path_display || '').split('/').filter(Boolean);
+        const tomb = parts[0] === 'deleted';
+        if (tomb) parts.shift();
+        if (parts.length !== 3 || !['character', 'group'].includes(parts[0])) continue;
+        if (!(tomb ? /\.json$/i : /\.jsonl$/i).test(parts[2])) continue;
+        const t = syncTargetOf(parts[0], dbxUnseg(parts[1]), dbxUnseg(parts[2].replace(/\.jsonl?$/i, '')));
+        if (tomb) { tombs.add(t.key.toLowerCase()); continue; }
+        inDropbox.add(t.key.toLowerCase());
+        // Dropbox ignores letter case, so a name differing only in case is the same chat.
+        if (local.has(t.key) || localLower.has(t.key.toLowerCase())) continue;
+        remove.push({
+            key: t.key, type: t.type, entity: t.type === 'group' ? t.groupId : t.avatar, chatId: t.chatId, label: t.label,
+            path: f.path_display || f.path_lower, rev: f.rev, size: f.size || 0, when: Date.parse(f.client_modified) || Date.parse(f.server_modified) || 0,
+            why: t.missing ? 'noentity' : 'notlocal',
+        });
+    }
+    for (const x of sync.decisions) {
+        if (x.kind === 'deleted' && local.has(x.t.key)) keep.push({ key: x.t.key, label: x.t.label, chatId: x.t.chatId, count: x.local.count });
+    }
+    const keptKeys = new Set(keep.map(x => x.key));
+    for (const [key, { t, count }] of local) {
+        const k = key.toLowerCase();
+        if (inDropbox.has(k) || keptKeys.has(key)) continue;
+        upload.push({ key, type: t.type, entity: t.type === 'group' ? t.groupId : t.avatar, chatId: t.chatId, label: t.label, count, deletedElsewhere: tombs.has(k) });
+    }
+    // Chats that hold only their greeting stay off Dropbox, like their backups.
+    const members = g => Math.max(1, (ctx().groups || []).find(x => String(x.id) === String(g))?.members?.length || 1);
+    const maybeGreeting = upload.filter(x => x.count <= (x.type === 'group' ? members(x.entity) : 1));
+    for (const x of maybeGreeting) {
+        try {
+            const st = chatState(await serverChat(syncTargetOf(x.type, x.entity, x.chatId)));
+            x.count = st.count;
+            if (!st.count || isGreetingOnly(st.msgs, st.head?.chat_metadata, { type: x.type, groupId: x.entity })) x.skip = true;
+        } catch { x.skip = true; }
+    }
+    const pendingChoices = sync.decisions.filter(x => !['new', 'gone', 'deleted'].includes(x.kind)).length;
+    return {
+        made: Date.now(),
+        remove: remove.sort((a, b) => a.label.localeCompare(b.label) || a.chatId.localeCompare(b.chatId)),
+        keep,
+        upload: upload.filter(x => !x.skip),
+        localCount: local.size,
+        pulled: { applied: pulled.applied.length, errors: pulled.errors },
+        pendingChoices,
+    };
+}
+
+/**
+ * Step 2: carry out a plan from cleanSyncPlan. only: keys of `remove` to delete (default all).
+ * Returns { removed, kept, uploaded, errors } and logs what was deleted.
+ */
+async function cleanSyncApply(plan, { only = null, upload = true, progress } = {}) {
+    if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
+    const picked = new Set(only ?? plan.remove.map(x => x.key));
+    const r = await withCloudLock(async () => {
+        const out = { removed: [], kept: [], uploaded: [], errors: [] };
+        const toRemove = plan.remove.filter(x => picked.has(x.key));
+        for (let i = 0; i < toRemove.length; i++) {
+            const x = toRemove[i];
+            progress?.(`กำลังลบออกจาก Dropbox ${i + 1}/${toRemove.length}…`);
+            try {
+                const t = syncTargetOf(x.type, x.entity, x.chatId);
+                let st = { sig: '', count: 0 };
+                try { st = chatState(parseJsonl(await dbxDownloadText(`rev:${x.rev}`))); } catch { /* deleted meanwhile */ }
+                await syncDeleteEverywhere(t, { path: x.path, note: { clean: true, sig: st.sig || undefined } });
+                out.removed.push({ ...x, count: st.count });
+            } catch (e) {
+                out.errors.push(`${x.label} — ${x.chatId}: ${e?.message ?? e}`);
+                if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
+            }
+        }
+        for (const x of plan.keep) {
+            const item = sync.decisions.find(d => d.kind === 'deleted' && d.t.key === x.key);
+            if (!item) continue;
+            progress?.(`กำลังเก็บ "${x.chatId}" ไว้…`);
+            try { await syncKeepDeleted(item); out.kept.push(x); } catch (e) { out.errors.push(`${x.label} — ${x.chatId}: ${e?.message ?? e}`); }
+        }
+        const ups = upload ? plan.upload : [];
+        for (let i = 0; i < ups.length; i++) {
+            const x = ups[i];
+            progress?.(`กำลังส่งขึ้น Dropbox ${i + 1}/${ups.length}…`);
+            try { if (await uploadServerChat(syncTargetOf(x.type, x.entity, x.chatId))) out.uploaded.push(x); } catch (e) {
+                out.errors.push(`${x.label} — ${x.chatId}: ${e?.message ?? e}`);
+                if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
+            }
+        }
+        const removedKeys = new Set(out.removed.map(x => x.key));
+        const keptKeys = new Set(out.kept.map(x => x.key));
+        sync.decisions = sync.decisions.filter(d => !((['new', 'gone'].includes(d.kind) && removedKeys.has(d.t.key)) || (d.kind === 'deleted' && keptKeys.has(d.t.key))));
+        if (out.removed.length) saveCleanLog([{ ts: Date.now(), removed: out.removed.map(({ why: _w, ...x }) => x) }, ...cleanLog()]);
+        return out;
+    });
+    if (r?.busy) throw new Error('Dropbox กำลังทำงานอื่นอยู่ — ลองอีกครั้งในอีกสักครู่');
+    renderSyncStatus();
+    badgeRest();
+    notifySynced('clean');
+    return r;
+}
+
+/** Send a chat that Dropbox doesn't have yet (Clean Sync). False when Dropbox already has it. */
+async function uploadServerChat(t) {
+    const arr = await serverChat(t);
+    const st = chatState(arr);
+    if (!st.count) return false;
+    let up;
+    try {
+        up = await dbxUpload(dbxPathOf(t), new Blob([toJsonl(arr)], { type: 'application/octet-stream' }), Date.now(), 'add');
+    } catch (e) {
+        if (/conflict/.test(String(e?.message))) return false;
+        throw e;
+    }
+    try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(t) }); } catch { /* no marker */ }
+    const now = Date.now();
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+    setCloudRecord(t.key, { ts: now, count: st.count });
+    await markKeySent(t.key);
+    return true;
+}
+
+/** Bring back a chat Clean Sync deleted (log entry from cleanLog): in Dropbox, here, and on the other devices. */
+async function cleanRestore(entry) {
+    if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
+    const t = syncTargetOf(entry.type, entry.entity, entry.chatId);
+    const r = await withCloudLock(async () => {
+        let res;
+        try { res = await dbxRpc('files/restore', { path: entry.path, rev: entry.rev }); } catch (e) {
+            throw new Error(`Dropbox กู้ไฟล์นี้ไม่ได้ (${e?.message ?? e}) — ไฟล์ที่ลบเก็บไว้ประมาณ 30 วัน`);
+        }
+        try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(t) }); } catch { /* no marker */ }
+        if (t.missing) setSyncBase(t.key, null);
+        else if (!chatState(await serverChat(t)).count) await syncUseRemote({ t, rev: res.rev });
+        else setSyncBase(t.key, null); // a chat with this name exists again here: the next sync compares them
+        const log = cleanLog();
+        for (const e of log) for (const x of e.removed) if (x.path === entry.path && x.rev === entry.rev) x.restored = Date.now();
+        saveCleanLog(log);
+        return { ok: true, created: !t.missing };
+    });
+    if (r?.busy) throw new Error('Dropbox กำลังทำงานอื่นอยู่ — ลองอีกครั้งในอีกสักครู่');
+    notifySynced('restore');
+    return r;
+}
+
+/** Tell other extensions (Chat Browser) that chats may have changed on this server. */
+function notifySynced(reason) {
+    try { document.dispatchEvent(new CustomEvent('chatautobackup:synced', { detail: { reason } })); } catch { /* ignore */ }
 }
 
 /** Leave this one alone until the Dropbox file changes again. */
@@ -2690,6 +3024,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         sync.error = out.errors.join(' · ');
         renderSyncStatus();
         badgeFinish(out.applied.length + out.itemsApplied.length);
+        if (out.applied.length) notifySynced('sync');
         return out;
     }, { wait: !auto });
 }
@@ -3936,6 +4271,15 @@ async function init() {
 }
 
 // expose for debugging / tests
-globalThis.ChatAutoBackup = { captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, syncSoon, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION };
+globalThis.ChatAutoBackup = {
+    captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, syncSoon, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION,
+    // used by Chat Browser
+    api: 2,
+    dropboxConnected: () => dbxConnected(),
+    syncInUse: () => dbxConnected() && !!dbxSettings().syncSince,
+    syncState: () => ({ running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
+    cloudInfo: key => (dbxConnected() ? { sent: cloudRecord(key), base: syncBase(key) } : null),
+    cleanSyncPlan, cleanSyncApply, cleanLog, cleanRestore, onChatRenamed, noteServerChange,
+};
 
 if (typeof jQuery === 'function') jQuery(init); else init();
