@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.5.0'; // keep in sync with manifest.json
+const VERSION = '2.6.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1421,7 +1421,7 @@ function renderSettings() {
                     <hr class="sysHR">
                     <b>ซิงค์แชทระหว่างเครื่อง</b>
                     <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
-                    <label class="checkbox_label" title="ตรวจทุก 3 นาที และทุกครั้งที่กลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
+                    <label class="checkbox_label" title="ซิงค์เต็มตอนเปิดแอป และเมื่อมีการเปลี่ยนแปลง (อีกเครื่องเขียนลง Dropbox หรือแก้ preset/การ์ด/lorebook… ในเครื่องนี้) ระหว่างนั้นเช็คเบา ๆ ทุก 1 นาทีและตอนกลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
                     <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแล้วลบใน Dropbox และเครื่องอื่นด้วย (แชท, Quick Reply, regex)</label>
                     <label class="checkbox_label" title="preset ทุกประเภทที่ ST จัดการ (Chat/Text Completion, Instruct, Context, System Prompt, Reasoning…) ถ้า preset ที่เลือกใช้อยู่ถูกอัปเดตจากอีกเครื่อง จะโหลดค่าใหม่ให้"><input type="checkbox" id="cab_sync_presets"> ซิงค์ preset ด้วย</label>
                     <label class="checkbox_label" title="lorebook (World Info) ที่เป็นไฟล์แยก ถ้าเปิด lorebook นั้นค้างไว้ในหน้าแก้ จะโหลดฉบับใหม่ให้"><input type="checkbox" id="cab_sync_worlds"> ซิงค์ lorebook ด้วย</label>
@@ -1429,7 +1429,7 @@ function renderSettings() {
                     <label class="checkbox_label" title="ชุด Quick Reply ทั้งหมด ชุดที่อัปเดตจากอีกเครื่องจะใช้ได้หลังโหลดหน้าใหม่ (จะขึ้นแจ้งเตือนให้แตะ)"><input type="checkbox" id="cab_sync_qr"> ซิงค์ Quick Reply ด้วย</label>
                     <label class="checkbox_label" title="regex แบบ global (regex ที่ผูกกับการ์ดหรือ preset ไปพร้อมการ์ด/preset อยู่แล้ว) ใช้ได้ทันที"><input type="checkbox" id="cab_sync_regex"> ซิงค์ regex ด้วย</label>
                     <label class="checkbox_label" title="การ์ดตัวละคร (ข้อมูลการ์ด รูป lorebook ที่ฝังในการ์ด) ชื่อไฟล์ avatar เหมือนกันทุกเครื่อง แชทจึงจับคู่กันได้ — ครั้งแรกต้องส่งการ์ดทุกใบขึ้น Dropbox อาจใช้เวลาและเน็ต"><input type="checkbox" id="cab_sync_cards"> ซิงค์การ์ดตัวละครด้วย</label>
-                    <label class="checkbox_label" title="วงกลมหมุนด้านบนจอตอนเปิดแอปหรือกลับเข้าแอป ขณะตรวจเช็คและซิงค์กับ Dropbox — ขึ้น ✓ ซิงค์เรียบร้อย แล้วค่อยเปิดแชท (การตรวจเบื้องหลังทุก 3 นาทีจะขึ้นเฉพาะตอนใช้เวลานานหรือมีอะไรอัปเดต)"><input type="checkbox" id="cab_sync_badge"> แสดงสัญลักษณ์สถานะซิงค์ด้านบนจอ</label>
+                    <label class="checkbox_label" title="วงกลมหมุนด้านบนจอตอนเปิดแอปหรือกลับเข้าแอป ขณะตรวจเช็คและซิงค์กับ Dropbox — ขึ้น ✓ ซิงค์เรียบร้อย แล้วค่อยเปิดแชท (การซิงค์เบื้องหลังจะขึ้นเฉพาะตอนเขียนอะไรลงเครื่องนี้)"><input type="checkbox" id="cab_sync_badge"> แสดงสัญลักษณ์สถานะซิงค์ด้านบนจอ</label>
                     <small id="cab_sync_status" class="cab_note"></small>
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
@@ -1588,7 +1588,7 @@ function wireEvents() {
         e.returnValue = '';
     });
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') { checkForNewVersion(); syncSoon(); }
+        if (document.visibilityState === 'visible') { checkForNewVersion(); syncCheck({ visible: true }); }
         if (document.visibilityState !== 'hidden') return;
         // Leaving the app: write what's pending (including a change with no message event,
         // e.g. an extension updating chat metadata), then push it off the device if we can.
@@ -1659,6 +1659,18 @@ const cloud = {
     lastOk: 0, pending: 0, withheld: [], error: '', progress: '',
     soonTimer: null,
 };
+
+// What Dropbox changed since the last full listing (list_folder cursor), minus this device's
+// own writes. Lets the background check cost one small request instead of a full sync.
+const watch = {
+    cursor: '',
+    ownRevs: new Set(),      // revisions this device uploaded
+    ownGone: new Set(),      // lowercase paths this device deleted or moved away
+    localDirty: false,       // a preset, card, lorebook… was saved here since the last full sync
+    lastCheck: 0,
+    settingsSig: '',
+};
+function noteOwn(m) { if (m?.rev) watch.ownRevs.add(m.rev); }
 
 function dbxSettings() {
     const s = settings();
@@ -1749,7 +1761,13 @@ async function dbxRpc(endpoint, body) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
     if (!res.ok) { const e = new Error(await dbxError(res)); e.status = res.status; throw e; }
-    return await res.json();
+    const out = await res.json();
+    if (/^files\/(delete|move|restore|copy)/.test(endpoint)) {
+        const gone = body?.from_path ?? (endpoint.startsWith('files/delete') ? body?.path : null);
+        if (gone) watch.ownGone.add(String(gone).toLowerCase());
+        noteOwn(out?.metadata ?? out);
+    }
+    return out;
 }
 
 async function dbxMetadata(path) {
@@ -1772,7 +1790,9 @@ async function dbxUpload(path, blob, ts, mode = 'overwrite') {
         body: blob,
     });
     if (!res.ok) throw new Error(await dbxError(res));
-    return await res.json();
+    const meta = await res.json();
+    noteOwn(meta);
+    return meta;
 }
 
 async function dbxDownloadBlob(path) {
@@ -2171,7 +2191,8 @@ function wireDbxPanel() {
     renderDbxPanel();
     renderSyncStatus();
     setInterval(() => cloudTick(), 30_000);
-    setInterval(() => syncSoon(0, { quiet: true }), 3 * 60_000);
+    setInterval(() => syncCheck(), 60_000); // one small request; a full sync only when something changed
+    watchLocalSaves();
     if (dbxConnected()) {
         setTimeout(() => cloudTick(), 5000);
         syncSoon(6000);
@@ -2948,6 +2969,7 @@ async function listChatFiles(only) {
         if (!page.has_more) break;
         page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
     }
+    watch.cursor = page.cursor;
     return files;
 }
 
@@ -2963,6 +2985,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
     return await withCloudLock(async () => {
         const out = { applied: [], decisions: [], missing: new Map(), errors: [], itemsApplied: [], itemsSent: 0 };
         sync.error = '';
+        if (!only) watch.localDirty = false;
         setBadge('check', '', { quiet });
         try {
             const files = await listChatFiles(only);
@@ -3024,6 +3047,8 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         sync.error = out.errors.join(' · ');
         renderSyncStatus();
         badgeFinish(out.applied.length + out.itemsApplied.length);
+        watch.settingsSig = settingsSig(); // regex/personas it wrote are not "saved here"
+        watch.lastCheck = Date.now();
         if (out.applied.length) notifySynced('sync');
         return out;
     }, { wait: !auto });
@@ -3063,9 +3088,9 @@ async function syncNow(opts = {}) {
 }
 
 /**
- * Automatic sync after `delay` ms. quiet: the 3-minute background check — the badge only
- * shows if it takes a while or changes something. Otherwise (opening or returning to the
- * app) the badge says "waiting to check" right away.
+ * Full automatic sync after `delay` ms. quiet: started by a change (the other device wrote to
+ * Dropbox, or something was saved here) — the badge shows only if it writes into this device.
+ * Otherwise (opening the app) the badge says "waiting to check" right away.
  */
 function syncSoon(delay = 2000, { quiet = false } = {}) {
     if (!dbxConnected() || !dbxSettings().syncAuto) return;
@@ -3075,7 +3100,9 @@ function syncSoon(delay = 2000, { quiet = false } = {}) {
     if (!quiet && !badgeBusy()) setBadge('pending', '', { quiet });
     sync.timer = setTimeout(async () => {
         sync.timer = null;
-        if (document.visibilityState === 'hidden' || Date.now() - sync.lastAt < (quiet ? 20_000 : 5_000)) { badgeRest(); return; }
+        if (document.visibilityState === 'hidden') { badgeRest(); return; }
+        const wait = (quiet ? 20_000 : 5_000) - (Date.now() - sync.lastAt);
+        if (wait > 0) { syncSoon(wait, { quiet }); return; } // just synced: do it once the pause is over
         try {
             const r = await syncPull({ auto: true, quiet });
             if (r?.busy) { syncSoon(3000, { quiet }); return; } // an upload holds Dropbox: try again shortly
@@ -3086,6 +3113,97 @@ function syncSoon(delay = 2000, { quiet = false } = {}) {
             setBadge('error', sync.error);
         }
     }, delay);
+}
+
+/**
+ * Has anything changed since the last full sync? One list_folder/continue request: if the
+ * other device wrote to Dropbox, or something was saved on this device, run a full sync;
+ * otherwise do nothing. visible: returning to the app — the badge shows the (short) check.
+ */
+async function syncCheck({ visible = false } = {}) {
+    if (!dbxConnected() || !dbxSettings().syncAuto || document.visibilityState === 'hidden') return;
+    if (sync.timer || badgeBusy()) return; // a sync is queued or running anyway
+    // Leaving the app starts an upload; coming back right after, look once it's done.
+    if (cloud.running) { if (visible) setTimeout(() => syncCheck({ visible }), 2000); return; }
+    if (visible && Date.now() - watch.lastCheck < 5_000) return;
+    watch.lastCheck = Date.now();
+    if (!watch.cursor || watch.localDirty) { syncSoon(visible ? 300 : 0, { quiet: !visible }); return; }
+    if (visible) setBadge('check', '', { quiet: false });
+    let changed = false, cursor = watch.cursor;
+    try {
+        for (;;) {
+            const page = await dbxRpc('files/list_folder/continue', { cursor });
+            changed ||= page.entries.some(e => (e['.tag'] === 'file' && !watch.ownRevs.has(e.rev))
+                || (e['.tag'] === 'deleted' && !watch.ownGone.has(String(e.path_lower))));
+            cursor = page.cursor;
+            if (!page.has_more) break;
+        }
+    } catch (e) {
+        console.warn(LOG, 'change check', e);
+        changed = true; // expired cursor or a hiccup: a full sync sorts it out
+    }
+    if (changed) {
+        if (visible) badge.phase = 'pending'; // stays visible through the full run
+        sync.lastAt = 0;
+        syncSoon(0, { quiet: !visible });
+        return;
+    }
+    watch.cursor = cursor;
+    if (visible) setBadge('done', 'ไม่มีอะไรเปลี่ยน', { ms: 1500 });
+}
+
+/** Something was saved on this device that the full sync uploads (preset, card, lorebook…). */
+function markLocalChange() {
+    if (cloud.running || !dbxConnected() || !dbxSettings().syncAuto) return; // the sync's own writes
+    watch.settingsSig = settingsSig();
+    watch.localDirty = true;
+    clearTimeout(watch.localTimer);
+    watch.localTimer = setTimeout(() => syncCheck(), 10_000); // after the last save in a burst
+}
+
+/** Does any Quick Reply set differ from what the last sync left? */
+async function quickRepliesChanged() {
+    if (dbxSettings().syncQuickReplies === false) return false;
+    const local = await localQuickReplies();
+    for (const [key, L] of local) {
+        const B = itemBase(key);
+        if (!B || B.deleted || (await itemHash(L)) !== B.hash) return true;
+    }
+    return Object.entries(itemBases()).some(([key, B]) => key.startsWith('qr:') && !B.deleted && !local.has(key));
+}
+
+/** Regex and personas live in settings.json, which ST saves for any setting. */
+function settingsSig() {
+    const c = ctx();
+    return hash(stableJson({ rx: c.extensionSettings?.regex ?? null, pd: c.powerUserSettings?.persona_descriptions ?? null, pn: c.powerUserSettings?.personas ?? null }));
+}
+
+/** Watch ST's own save requests (also TauriTavern's, which go through the same fetch) and events. */
+function watchLocalSaves() {
+    const SAVES = /\/api\/(presets\/(save|delete)|worldinfo\/(edit|delete|import)|characters\/(edit|edit-attribute|merge-attributes|import|create|rename|delete|duplicate)|avatars\/(upload|delete))\b/;
+    watch.settingsSig = settingsSig();
+    const { eventSource, event_types: E } = ctx();
+    for (const ev of ['PRESET_DELETED', 'PRESET_RENAMED', 'CHARACTER_EDITED', 'CHARACTER_DELETED', 'CHARACTER_RENAMED', 'CHARACTER_DUPLICATED',
+        'WORLDINFO_UPDATED', 'PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED', 'PERSONA_DELETED']) {
+        if (E?.[ev]) eventSource.on(E[ev], () => markLocalChange());
+    }
+    const orig = window.fetch;
+    window.fetch = function (input, init) {
+        const p = orig.apply(this, arguments);
+        try {
+            const url = typeof input === 'string' ? input : input?.url ?? String(input);
+            // The sync's own writes run under cloud.running; they need no second look.
+            if (!cloud.running && /\/api\//.test(url)) {
+                if (SAVES.test(url)) markLocalChange();
+                // The Quick Reply module re-saves sets on its own (e.g. opening a chat): look at the content.
+                else if (/\/api\/quick-replies\/(save|delete)\b/.test(url)) p.then(() => quickRepliesChanged()).then(c => { if (c) markLocalChange(); }).catch(() => {});
+                else if (/\/api\/settings\/save\b/.test(url)) {
+                    if (settingsSig() !== watch.settingsSig) markLocalChange();
+                }
+            }
+        } catch { /* never break ST's request */ }
+        return p;
+    };
 }
 
 function renderSyncStatus() {
@@ -3129,11 +3247,11 @@ function syncProgress(text, short) {
 //   ⚠ รอเลือก N รายการ     stays; tap to choose
 //   ✗ ซิงค์ไม่สำเร็จ       stays until the next good run; tap for details
 
-const badge = { phase: 'idle', text: '', detail: '', quiet: false, revealed: false, changed: false, timer: null, revealTimer: null };
+const badge = { phase: 'idle', text: '', detail: '', quiet: false, revealed: false, changed: false, timer: null };
 const BADGE_BUSY = ['pending', 'check', 'apply'];
 const badgeBusy = () => BADGE_BUSY.includes(badge.phase);
 
-function setBadge(phase, text = '', { quiet = badge.quiet } = {}) {
+function setBadge(phase, text = '', { quiet = badge.quiet, ms = 4000 } = {}) {
     const wasBusy = badgeBusy();
     badge.phase = phase;
     badge.text = text;
@@ -3142,16 +3260,9 @@ function setBadge(phase, text = '', { quiet = badge.quiet } = {}) {
         if (!wasBusy) { badge.changed = false; badge.detail = ''; badge.quiet = quiet; badge.revealed = false; }
         if (!quiet) badge.quiet = false;
         if (phase !== 'check') badge.detail = '';
-        // A background check that finishes quickly and changes nothing never shows.
+        // A background sync shows only once it writes something into this device.
         if (!badge.quiet || phase === 'apply') badge.revealed = true;
-        else if (!badge.revealed && !badge.revealTimer) {
-            badge.revealTimer = setTimeout(() => { badge.revealTimer = null; if (badgeBusy()) { badge.revealed = true; renderSyncBadge(); } }, 1500);
-        }
-    } else {
-        clearTimeout(badge.revealTimer);
-        badge.revealTimer = null;
-        if (phase === 'done') badge.timer = setTimeout(() => setBadge('idle'), 4000);
-    }
+    } else if (phase === 'done') badge.timer = setTimeout(() => setBadge('idle'), ms);
     renderSyncBadge();
 }
 
@@ -4272,7 +4383,7 @@ async function init() {
 
 // expose for debugging / tests
 globalThis.ChatAutoBackup = {
-    captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, syncSoon, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION,
+    captureNow, store, flush, schedule, dbAllMeta, dbMetaByKey, snapshotText, exportAll, importFile, restoreAsNewChat, openBrowser, checkLoadedChat, backupNow, settings, updateIndicator, cleanText, describeChanges, deriveFromJsonl, cloudTick, cloudPull, syncPull, syncNow, syncSoon, syncCheck, showSyncDecisions, showAttention, checkForNewVersion, reloadWithFreshFiles, VERSION,
     // used by Chat Browser
     api: 2,
     dropboxConnected: () => dbxConnected(),
