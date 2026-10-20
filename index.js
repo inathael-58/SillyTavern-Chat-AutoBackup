@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.6.0'; // keep in sync with manifest.json
+const VERSION = '2.7.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1422,7 +1422,7 @@ function renderSettings() {
                     <b>ซิงค์แชทระหว่างเครื่อง</b>
                     <small class="cab_note">ใช้เมื่อเล่นสลับหลายที่ เช่น ST บนโฮสกับ TauriTavern: เชื่อมต่อ Dropbox app เดียวกันทุกที่ แล้วแชทที่คุยต่อจากอีกที่จะถูกเขียนลงแชทในเครื่องนี้ ถ้าแก้ทั้งสองฝั่งจะให้เลือกเอง ตัวละครและกลุ่มต้องมีอยู่แล้วทั้งสองที่ (ชื่อไฟล์ avatar ตรงกัน)</small>
                     <label class="checkbox_label" title="ซิงค์เต็มตอนเปิดแอป และเมื่อมีการเปลี่ยนแปลง (อีกเครื่องเขียนลง Dropbox หรือแก้ preset/การ์ด/lorebook… ในเครื่องนี้) ระหว่างนั้นเช็คเบา ๆ ทุก 1 นาทีและตอนกลับเข้าแอป — เขียนลงเครื่องเฉพาะกรณีที่ปลอดภัย (อีกเครื่องคุยต่อ หรือในเครื่องนี้ไม่ได้แก้) · แชทที่เปลี่ยนในเครื่องนี้จะส่งขึ้นทันทีภายในไม่กี่วินาที"><input type="checkbox" id="cab_sync_auto"> ดึงแชทที่ใหม่กว่าจาก Dropbox อัตโนมัติ</label>
-                    <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแล้วลบใน Dropbox และเครื่องอื่นด้วย (แชท, Quick Reply, regex)</label>
+                    <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแล้วลบใน Dropbox และเครื่องอื่นด้วย (แชท, การ์ด, persona, Quick Reply, regex)</label>
                     <label class="checkbox_label" title="preset ทุกประเภทที่ ST จัดการ (Chat/Text Completion, Instruct, Context, System Prompt, Reasoning…) ถ้า preset ที่เลือกใช้อยู่ถูกอัปเดตจากอีกเครื่อง จะโหลดค่าใหม่ให้"><input type="checkbox" id="cab_sync_presets"> ซิงค์ preset ด้วย</label>
                     <label class="checkbox_label" title="lorebook (World Info) ที่เป็นไฟล์แยก ถ้าเปิด lorebook นั้นค้างไว้ในหน้าแก้ จะโหลดฉบับใหม่ให้"><input type="checkbox" id="cab_sync_worlds"> ซิงค์ lorebook ด้วย</label>
                     <label class="checkbox_label" title="ชื่อ คำอธิบาย ตำแหน่ง/ความลึก lorebook ที่ผูกไว้ การผูกกับตัวละคร และรูป persona (การเปลี่ยนแค่รูปจะไปพร้อมการแก้ครั้งถัดไป)"><input type="checkbox" id="cab_sync_personas"> ซิงค์ persona ด้วย</label>
@@ -3155,6 +3155,22 @@ async function syncCheck({ visible = false } = {}) {
 /** Something was saved on this device that the full sync uploads (preset, card, lorebook…). */
 function markLocalChange() {
     if (cloud.running || !dbxConnected() || !dbxSettings().syncAuto) return; // the sync's own writes
+    markLocalChangeNow();
+}
+
+/**
+ * Deleting many cards or personas at once (e.g. Bulk Manager) easily overlaps a running
+ * upload, and markLocalChange drops what happens meanwhile. A deletion must not be lost,
+ * so wait for the run to end and mark it then (at worst one extra, quiet sync).
+ */
+function markDeletion() {
+    if (!dbxConnected() || !dbxSettings().syncAuto) return;
+    if (!cloud.running) { markLocalChangeNow(); return; }
+    clearTimeout(watch.deletionTimer);
+    watch.deletionTimer = setTimeout(markDeletion, 3000);
+}
+
+function markLocalChangeNow() {
     watch.settingsSig = settingsSig();
     watch.localDirty = true;
     clearTimeout(watch.localTimer);
@@ -3183,9 +3199,12 @@ function watchLocalSaves() {
     const SAVES = /\/api\/(presets\/(save|delete)|worldinfo\/(edit|delete|import)|characters\/(edit|edit-attribute|merge-attributes|import|create|rename|delete|duplicate)|avatars\/(upload|delete))\b/;
     watch.settingsSig = settingsSig();
     const { eventSource, event_types: E } = ctx();
-    for (const ev of ['PRESET_DELETED', 'PRESET_RENAMED', 'CHARACTER_EDITED', 'CHARACTER_DELETED', 'CHARACTER_RENAMED', 'CHARACTER_DUPLICATED',
-        'WORLDINFO_UPDATED', 'PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED', 'PERSONA_DELETED']) {
+    for (const ev of ['PRESET_DELETED', 'PRESET_RENAMED', 'CHARACTER_EDITED', 'CHARACTER_RENAMED', 'CHARACTER_DUPLICATED',
+        'WORLDINFO_UPDATED', 'PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED']) {
         if (E?.[ev]) eventSource.on(E[ev], () => markLocalChange());
+    }
+    for (const ev of ['CHARACTER_DELETED', 'PERSONA_DELETED']) {
+        if (E?.[ev]) eventSource.on(E[ev], () => markDeletion());
     }
     const orig = window.fetch;
     window.fetch = function (input, init) {
@@ -3775,13 +3794,66 @@ function applyRegex(id, obj) {
 }
 
 // Items whose deletion is synced (a marker under /deleted/, like chats).
-const DELETABLE = { qr: 'quickreplies', rx: 'regex' };
-const itemTombPath = item => `/deleted/${DELETABLE[item.type]}/${dbxSeg(item.type === 'qr' ? item.name : item.id)}.json`;
-const itemPathOf = item => (item.type === 'qr' ? quickReplyPath(item.name) : regexPath(item.id));
+const DELETABLE = { qr: 'quickreplies', rx: 'regex', card: 'cards', persona: 'personas' };
+const itemIdOf = item => (item.type === 'qr' ? item.name : item.type === 'card' ? item.avatar : item.id);
+const itemTombPath = item => `/deleted/${DELETABLE[item.type]}/${dbxSeg(itemIdOf(item))}.json`;
+const itemPathOf = item => (item.type === 'qr' ? quickReplyPath(item.name) : item.type === 'card' ? cardPath(item.avatar)
+    : item.type === 'persona' ? personaPath(item.id) : regexPath(item.id));
 
-/** Delete a Quick Reply set or regex script here because another device deleted it. */
+let personasModule;
+async function stPersonas() {
+    if (personasModule === undefined) {
+        try { personasModule = await import(new URL('../../../personas.js', import.meta.url).href); } catch (e) {
+            console.warn(LOG, 'personas module not reachable', e);
+            personasModule = null;
+        }
+    }
+    return personasModule;
+}
+
+/**
+ * A card or persona this side can't delete on its own: the open chat's character, or the
+ * persona in use. Deleting those under ST's feet breaks the chat, so the user decides.
+ */
+async function inUseHere(item) {
+    if (item.type === 'card') {
+        const c = ctx();
+        return c.characterId !== undefined && c.characters?.[c.characterId]?.avatar === item.avatar;
+    }
+    if (item.type === 'persona') return (await stPersonas())?.user_avatar === item.id;
+    return false;
+}
+
+/** Delete a Quick Reply set, regex script, card or persona here because another device deleted it. */
 async function deleteItemLocally(item) {
-    if (item.type === 'qr') {
+    if (item.type === 'card' || item.type === 'persona') {
+        if (await inUseHere(item)) {
+            throw new Error(item.type === 'card' ? 'กำลังเปิดแชทของการ์ดนี้อยู่ — ปิดแชทหรือเปลี่ยนไปตัวอื่นก่อน' : 'กำลังใช้ persona นี้อยู่ — สลับไปตัวอื่นก่อน');
+        }
+    }
+    if (item.type === 'card') {
+        // Chats stay on disk (each chat's own deletion syncs separately); re-importing the card brings them back.
+        const res = await fetch('/api/characters/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ avatar_url: item.avatar, delete_chats: false }) });
+        if (!res.ok && res.status !== 400) throw new Error(`ลบการ์ด ${item.avatar} ไม่สำเร็จ (${res.status})`); // 400: already gone
+        cardHashCache.delete(item.avatar);
+        try { await ctx().getCharacters?.(); } catch (e) { console.warn(LOG, e); }
+    } else if (item.type === 'persona') {
+        const c = ctx();
+        const pu = c.powerUserSettings;
+        const res = await fetch('/api/avatars/delete', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify({ avatar: item.id }) });
+        if (!res.ok && res.status !== 404) throw new Error(`ลบ persona ${item.label} ไม่สำเร็จ (${res.status})`); // 404: picture already gone
+        if (pu) {
+            delete pu.personas?.[item.id];
+            delete pu.persona_descriptions?.[item.id];
+            if (pu.default_persona === item.id) pu.default_persona = null;
+        }
+        if (c.chatMetadata?.persona === item.id) {
+            delete c.chatMetadata.persona;
+            c.saveMetadataDebounced?.();
+        }
+        c.saveSettingsDebounced();
+        try { await (await stPersonas())?.getUserAvatars?.(true); } catch (e) { console.warn(LOG, e); }
+    } else if (item.type === 'qr') {
         const res = await fetch('/api/quick-replies/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ name: item.name }) });
         if (!res.ok) throw new Error(`ลบ Quick Reply "${item.name}" ไม่สำเร็จ (${res.status})`);
         if (!qrReloadNeeded) {
@@ -4039,6 +4111,8 @@ async function syncItems(entries, out, { auto = false } = {}) {
             const v = dbxUnseg(parts[2].replace(/\.json$/i, ''));
             if (doQr && parts[1] === 'quickreplies') tombs.set(`qr:${v}`, { ...e, type: 'qr', name: v, label: `Quick Reply: ${v}` });
             if (doRegex && parts[1] === 'regex') tombs.set(`rx:${v}`, { ...e, type: 'rx', id: v, label: `Regex: ${v}` });
+            if (doCards && parts[1] === 'cards') tombs.set(`card:${v}`, { ...e, type: 'card', avatar: v, label: `การ์ด: ${v.replace(/\.png$/i, '')}` });
+            if (doPersonas && parts[1] === 'personas') tombs.set(`persona:${v}`, { ...e, type: 'persona', id: v, label: `Persona: ${v}` });
         } else if (doRegex && parts.length === 1 && parts[0] === 'regexorder.json') {
             regexOrder = e;
         }
@@ -4053,7 +4127,10 @@ async function syncItems(entries, out, { auto = false } = {}) {
     if (doQr && !qrReachable) for (const map of [remote, tombs]) for (const k of [...map.keys()]) if (k.startsWith('qr:')) map.delete(k);
     // Only trust "missing here" as a deletion when the local list could really be read.
     const deletesOn = d.syncDeletes !== false;
-    const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex) : false);
+    // An empty character / persona list means "not loaded yet", never "all deleted".
+    const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex)
+        : type === 'card' ? (ctx().characters?.length ?? 0) > 0
+        : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
     const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])];
     const deadline = auto ? Date.now() + 15_000 : Infinity;
     const cardsApplied = [];
@@ -4067,7 +4144,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
                 // Deleted on another device.
                 if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
                 if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
-                if (B && !B.deleted && (await itemHash(L)) === B.hash) {
+                if (B && !B.deleted && (await itemHash(L)) === B.hash && !(await inUseHere(L))) {
                     badgeApply(label);
                     await deleteItemLocally(L);
                     setItemBase(key, { deleted: true, rev: T.rev });
