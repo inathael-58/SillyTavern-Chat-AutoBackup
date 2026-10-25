@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.7.0'; // keep in sync with manifest.json
+const VERSION = '2.7.1'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1434,6 +1434,7 @@ function renderSettings() {
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
                         <div id="cab_sync_decide" class="menu_button" hidden>เลือกฉบับ</div>
+                        <div id="cab_sync_undelete" class="menu_button" title="การ์ดและ persona ที่ถูกลบผ่านการซิงค์ เลือกแล้วกู้กลับมาได้ทุกเครื่อง (Dropbox เก็บไฟล์ที่ลบไว้ประมาณ 30 วัน)">กู้การ์ด/persona ที่ถูกลบ</div>
                     </div>
                 </div>
                 <div id="cab_pocky" hidden>
@@ -2171,6 +2172,7 @@ function wireDbxPanel() {
         if (r?.busy) toast.info('กำลังส่งขึ้น Dropbox อยู่ ลองอีกครั้งในอีกสักครู่', 'ซิงค์');
     }));
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
+    $('cab_sync_undelete').addEventListener('click', () => { showDeletedItems().catch(e => toast.err(String(e?.message ?? e), 'ซิงค์')); });
     $('cab_sync_presets').checked = d.syncPresets !== false;
     $('cab_sync_presets').addEventListener('change', e => { d.syncPresets = e.target.checked; saveSettings(); });
     $('cab_sync_worlds').checked = d.syncLorebooks !== false;
@@ -3203,9 +3205,8 @@ function watchLocalSaves() {
         'WORLDINFO_UPDATED', 'PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED']) {
         if (E?.[ev]) eventSource.on(E[ev], () => markLocalChange());
     }
-    for (const ev of ['CHARACTER_DELETED', 'PERSONA_DELETED']) {
-        if (E?.[ev]) eventSource.on(E[ev], () => markDeletion());
-    }
+    if (E?.CHARACTER_DELETED) eventSource.on(E.CHARACTER_DELETED, data => { noteDeletedHere(`card:${data?.character?.avatar ?? ''}`); markDeletion(); });
+    if (E?.PERSONA_DELETED) eventSource.on(E.PERSONA_DELETED, data => { noteDeletedHere(`persona:${data?.avatarId ?? ''}`); markDeletion(); });
     const orig = window.fetch;
     window.fetch = function (input, init) {
         const p = orig.apply(this, arguments);
@@ -3793,6 +3794,122 @@ function applyRegex(id, obj) {
     ctx().saveSettingsDebounced();
 }
 
+// Cards and personas the user deleted on this device (ST's own delete events), waiting for the
+// sync to pass the deletion on. Only these leave a marker: a card that is merely missing here
+// (renamed — ST renames the PNG with the character — or named in another letter case) must not.
+function deletedHereKey() { return `cab_deleted_here:${dbxSettings().appKey || ''}`; }
+function deletedHere() {
+    try { return new Set(JSON.parse(localStorage.getItem(deletedHereKey()) || '[]')); } catch { return new Set(); }
+}
+function setDeletedHere(set) {
+    try { localStorage.setItem(deletedHereKey(), JSON.stringify([...set])); } catch { /* storage unavailable: the deletion just isn't passed on */ }
+}
+function noteDeletedHere(key) {
+    if (/^(card|persona):./.test(key)) { const set = deletedHere(); set.add(key); setDeletedHere(set); }
+}
+function forgetDeletedHere(key) {
+    const set = deletedHere();
+    if (set.delete(key)) setDeletedHere(set);
+}
+
+// Markers written by 2.7.0 came from guessing ("missing here") and deleted renamed cards on the
+// other devices. Only markers that say `explicit` may delete a card or persona.
+const tombNotes = new Map(); // marker rev -> parsed marker
+async function tombIsExplicit(T) {
+    if (!tombNotes.has(T.rev)) {
+        let note = null;
+        try { note = JSON.parse(await dbxDownloadText(`rev:${T.rev}`)); } catch { /* unreadable: treat as a guess */ }
+        tombNotes.set(T.rev, note);
+    }
+    return !!tombNotes.get(T.rev)?.explicit;
+}
+
+/** Cards and personas that have a deletion marker in Dropbox: { type, id, key, tomb, label, when }. */
+async function listDeletedItems() {
+    const out = [];
+    for (const [folder, type] of [['/deleted/cards', 'card'], ['/deleted/personas', 'persona']]) {
+        let page;
+        try { page = await dbxRpc('files/list_folder', { path: folder, limit: 2000 }); } catch (e) {
+            if (/not_found/.test(String(e?.message))) continue;
+            throw e;
+        }
+        for (;;) {
+            for (const e of page.entries) {
+                if (e['.tag'] !== 'file' || !/\.json$/i.test(e.name)) continue;
+                const id = dbxUnseg(e.name.replace(/\.json$/i, ''));
+                const known = type === 'persona' ? ctx().powerUserSettings?.personas?.[id] : null;
+                out.push({
+                    type, id, key: `${type}:${id}`, tomb: e.path_display || `${folder}/${e.name}`,
+                    label: type === 'card' ? `การ์ด: ${id.replace(/\.png$/i, '')}` : `Persona: ${known || id}`,
+                    when: Date.parse(e.server_modified) || 0,
+                });
+            }
+            if (!page.has_more) break;
+            page = await dbxRpc('files/list_folder/continue', { cursor: page.cursor });
+        }
+    }
+    return out.sort((a, b) => b.when - a.when);
+}
+
+/** Bring a deleted card or persona back in Dropbox and drop its marker; the sync then puts it back on every device. */
+async function restoreDeletedItem(x) {
+    const path = x.type === 'card' ? cardPath(x.id) : personaPath(x.id);
+    let revs;
+    try { revs = await dbxRpc('files/list_revisions', { path, mode: 'path', limit: 10 }); } catch (e) {
+        throw new Error(`${x.label}: หาไฟล์เดิมใน Dropbox ไม่เจอ (${e?.message ?? e})`);
+    }
+    const rev = revs?.entries?.[0]?.rev;
+    if (!rev) throw new Error(`${x.label}: Dropbox ไม่มีฉบับเก่าเหลือแล้ว (เก็บไว้ประมาณ 30 วัน)`);
+    if (revs.is_deleted !== false) await dbxRpc('files/restore', { path, rev });
+    try { await dbxRpc('files/delete_v2', { path: x.tomb }); } catch { /* already gone */ }
+    setItemBase(x.key, null); // compare afresh: missing here → brought in, same here → agreed
+    forgetDeletedHere(x.key);
+}
+
+async function showDeletedItems() {
+    if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
+    const items = await listDeletedItems();
+    if (!items.length) { toast.info('ไม่มีการ์ดหรือ persona ที่ถูกลบผ่านการซิงค์', 'ซิงค์'); return; }
+    const { wrap, close } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>การ์ด / persona ที่ถูกลบผ่านการซิงค์</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list">
+                <p class="cab_note">เลือกอันที่จะเอากลับมา แล้วกด <b>กู้คืน</b> ไฟล์เดิมใน Dropbox จะถูกกู้ แล้วซิงค์จะใส่กลับเข้าทุกเครื่อง แชทของการ์ดยังอยู่ในเครื่อง จะกลับมาพร้อมการ์ด</p>
+                <label class="checkbox_label"><input type="checkbox" id="cab_undel_all"> เลือกทั้งหมด (${items.length})</label>
+                ${items.map((x, i) => `<label class="checkbox_label"><input type="checkbox" class="cab_undel_cb" data-i="${i}"> ${escapeHtml(x.label)} <small class="cab_note">ลบเมื่อ ${x.when ? fmtTime(x.when) : '?'}</small></label>`).join('')}
+            </div>
+            <div class="cab_foot"><div class="cab_buttons"><div id="cab_undel_go" class="menu_button"><i class="fa-solid fa-rotate-left"></i> กู้คืน</div></div></div>
+        </div>`);
+    const cbs = [...wrap.querySelectorAll('.cab_undel_cb')];
+    wrap.querySelector('#cab_undel_all').addEventListener('change', e => { for (const cb of cbs) cb.checked = e.target.checked; });
+    const go = wrap.querySelector('#cab_undel_go');
+    go.addEventListener('click', async () => {
+        const picked = cbs.filter(cb => cb.checked).map(cb => items[Number(cb.dataset.i)]);
+        if (!picked.length || go.classList.contains('disabled')) return;
+        go.classList.add('disabled');
+        const errors = [];
+        let done = 0;
+        try {
+            const r = await withCloudLock(async () => {
+                for (const x of picked) {
+                    try { await restoreDeletedItem(x); done++; } catch (e) { errors.push(String(e?.message ?? e)); }
+                }
+            });
+            if (r?.busy) throw new Error('Dropbox กำลังทำงานอื่นอยู่ — ลองอีกครั้งในอีกสักครู่');
+            if (done) toast.ok(`กู้คืนใน Dropbox แล้ว ${done} รายการ กำลังซิงค์กลับเข้าเครื่องนี้…`, 'ซิงค์');
+            for (const e of errors) toast.err(e, 'ซิงค์');
+            close();
+            if (done) { sync.lastAt = 0; await syncNow(); }
+        } catch (e) {
+            toast.err(String(e?.message ?? e), 'ซิงค์');
+            go.classList.remove('disabled');
+        }
+    });
+}
+
 // Items whose deletion is synced (a marker under /deleted/, like chats).
 const DELETABLE = { qr: 'quickreplies', rx: 'regex', card: 'cards', persona: 'personas' };
 const itemIdOf = item => (item.type === 'qr' ? item.name : item.type === 'card' ? item.avatar : item.id);
@@ -3871,7 +3988,7 @@ async function deleteItemLocally(item) {
 
 /** Deleted here: take it out of Dropbox and leave a marker for the other devices. */
 async function deleteItemEverywhere(item) {
-    const marker = new Blob([JSON.stringify({ deleted: new Date().toISOString() })], { type: 'application/octet-stream' });
+    const marker = new Blob([JSON.stringify({ deleted: new Date().toISOString(), explicit: true })], { type: 'application/octet-stream' });
     const up = await dbxUpload(itemTombPath(item), marker, Date.now(), 'overwrite');
     try { await dbxRpc('files/delete_v2', { path: itemPathOf(item) }); } catch (e) {
         if (!/not_found/.test(String(e?.message))) throw e;
@@ -4132,17 +4249,25 @@ async function syncItems(entries, out, { auto = false } = {}) {
         : type === 'card' ? (ctx().characters?.length ?? 0) > 0
         : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
     const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])];
+    const deleted = deletedHere();
     const deadline = auto ? Date.now() + 15_000 : Infinity;
     const cardsApplied = [];
     for (let i = 0; i < keys.length && Date.now() < deadline; i++) {
         const key = keys[i];
         const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
+        if (L && deleted.has(key)) { forgetDeletedHere(key); deleted.delete(key); } // made again here
         const label = (L || R || T).label;
         syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
         try {
             if (!R && T) {
                 // Deleted on another device.
                 if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
+                if ((L.type === 'card' || L.type === 'persona') && !(await tombIsExplicit(T))) {
+                    // A 2.7.0 marker: maybe just a rename elsewhere. Keep it and send it back up.
+                    await keepDeletedItem(L);
+                    out.itemsSent++;
+                    continue;
+                }
                 if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
                 if (B && !B.deleted && (await itemHash(L)) === B.hash && !(await inUseHere(L))) {
                     badgeApply(label);
@@ -4166,8 +4291,13 @@ async function syncItems(entries, out, { auto = false } = {}) {
             }
             if (B && B.rev === R.rev) {
                 if (!L) {
-                    // Deleted here since the last match.
-                    if (DELETABLE[R.type] && deletesOn && listedHere(R.type)) { await deleteItemEverywhere({ ...R, key }); out.itemsSent++; }
+                    // Deleted here since the last match (cards and personas: only when the user deleted it here).
+                    const explicitOnly = R.type === 'card' || R.type === 'persona';
+                    if (DELETABLE[R.type] && deletesOn && listedHere(R.type) && (!explicitOnly || deleted.has(key))) {
+                        await deleteItemEverywhere({ ...R, key });
+                        forgetDeletedHere(key);
+                        out.itemsSent++;
+                    }
                     continue;
                 }
                 const lh = await itemHash(L);
