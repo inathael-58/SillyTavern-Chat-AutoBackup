@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.7.2'; // keep in sync with manifest.json
+const VERSION = '2.8.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -192,6 +192,7 @@ async function dbAdd(meta, payload, sigs) {
     tx.objectStore(PAYLOAD).put({ id, ...payload });
     if (sigs) tx.objectStore(SIGS).put({ id, head: sigs.head, msgs: sigs.msgs });
     await txDone(tx);
+    if (!meta.cloud) cloud.unsent?.add(meta.key);
     return id;
 }
 
@@ -293,9 +294,9 @@ function cleanText(text, { keepLines = false } = {}) {
 }
 
 /** mes-hash | swipe count | selected swipe | whole-message hash */
-function msgSig(m, json) {
+function msgSig(m, json, mesHash = hash(String(m?.mes ?? ''))) {
     const sw = Array.isArray(m?.swipes) ? m.swipes.length : 0;
-    return `${hash(String(m?.mes ?? ''))}|${sw}|${Number(m?.swipe_id) || 0}|${hash(json)}`;
+    return `${mesHash}|${sw}|${Number(m?.swipe_id) || 0}|${hash(json)}`;
 }
 
 function sigHash(sigs) {
@@ -467,13 +468,19 @@ function captureNow() {
     lines.push(h);
     head = hash(h);
     const msgs = [];
+    // With Dropbox, also the sync signature (chatState) now, from the messages already in
+    // memory, so the upload doesn't have to parse the whole chat back out of the snapshot.
+    const keys = dbxConnected() ? [] : null;
     for (const m of messages) {
         const j = JSON.stringify(m);
         lines.push(j);
-        msgs.push(msgSig(m, j));
+        const mh = hash(String(m?.mes ?? ''));
+        msgs.push(msgSig(m, j, mh));
+        keys?.push(syncMsgKeyWith(m, mh));
     }
     const jsonl = lines.join('\n');
     const sigs = { head, msgs };
+    const syncState = keys && { keys, sig: hash(keys.join('\n')), meta: metaSig(JSON.parse(h)), count: keys.length };
 
     return {
         info,
@@ -484,6 +491,7 @@ function captureNow() {
         greetingOnly: isGreetingOnly(messages, c.chatMetadata ?? c.chat_metadata, info),
         ...lastMsgInfo(messages[messages.length - 1]),
         ts: Date.now(),
+        syncState,
     };
 }
 
@@ -505,8 +513,21 @@ function isGreetingOnly(messages, meta, info) {
 
 // ---------------------------------------------------------------- core backup logic
 
+// chatState() of the last few snapshots written, by snapshot hash (see captureNow).
+const syncStateCache = new Map();
+function rememberSyncState(snapHash, st) {
+    syncStateCache.delete(snapHash);
+    syncStateCache.set(snapHash, st);
+    while (syncStateCache.size > 8) syncStateCache.delete(syncStateCache.keys().next().value);
+}
+
 let pending = null;       // captured-but-not-yet-written snapshot
 let pendingTimer = null;
+let captureTimer = null;  // a burst of change events, captured once when it settles
+let captureKey = null;    // the chat that burst was about
+// One reply fires several events (received, rendered, ended…); serialising a long chat costs
+// hundreds of ms on a phone, so wait for the burst to settle and capture it once.
+const CAPTURE_SETTLE_MS = 300;
 let writing = Promise.resolve();
 const lastHashByKey = new Map();
 const inflightByKey = new Map(); // key -> number of writes queued/running
@@ -516,17 +537,34 @@ let lastError = null;            // { key, message } of the most recent failed w
 function schedule() {
     const s = settings();
     if (!s.enabled) return;
-    const snap = captureNow();
-    if (!snap) { updateIndicator(); return; }
+    const info = currentChatInfo();
+    if (!info) { updateIndicator(); return; }
     // If a snapshot for a different chat is still pending, write it now.
-    if (pending && pending.info.key !== snap.info.key) flush();
-    pending = snap;
-    clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(flush, Math.max(0, Number(s.debounceSec) || 0) * 1000);
+    if (captureKey && captureKey !== info.key) captureSettled();
+    if (pending && pending.info.key !== info.key) flush();
+    captureKey = info.key;
+    clearTimeout(captureTimer);
+    captureTimer = setTimeout(captureSettled, CAPTURE_SETTLE_MS);
     updateIndicator();
 }
 
+/** Capture the chat a burst of events was about, then wait `debounceSec` before writing it. */
+function captureSettled() {
+    clearTimeout(captureTimer);
+    captureTimer = null;
+    const key = captureKey;
+    captureKey = null;
+    if (!key) return;
+    const snap = captureNow();
+    // Another chat is open by now: the old one was saved by ST and is no longer in memory.
+    if (!snap || snap.info.key !== key) { updateIndicator(); return; }
+    pending = snap;
+    clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(flush, Math.max(0, Number(settings().debounceSec) || 0) * 1000);
+}
+
 function flush() {
+    if (captureKey) captureSettled();
     clearTimeout(pendingTimer);
     pendingTimer = null;
     const snap = pending;
@@ -603,6 +641,7 @@ async function store(snap, { force = false, reason = 'auto' } = {}) {
         sv: SNAP_VERSION,
     };
     const id = await dbAdd(meta, packed, snap.sigs);
+    if (snap.syncState) rememberSyncState(snap.hash, snap.syncState);
     if (mergeInto) await dbDelete([mergeInto.id]);
     lastHashByKey.set(info.key, snap.hash);
 
@@ -934,6 +973,7 @@ async function renderBrowser() {
         row.querySelector('.cab_del').addEventListener('click', guard(async () => {
             if (!confirm('ลบ snapshot นี้?')) return;
             await dbDelete([meta.id]);
+            cloud.unsent = null; // an older snapshot may be the newest now: look at every chat again
             await renderBrowser();
             updateIndicator();
         }));
@@ -1101,7 +1141,7 @@ async function updateIndicator() {
 
     const newest = list[0];
     const peak = list.filter(m => !m.acked).reduce((a, b) => (!a || b.count > a.count ? b : a), null);
-    const busy = (pending && pending.info.key === info.key) || inflightByKey.has(info.key);
+    const busy = captureKey === info.key || (pending && pending.info.key === info.key) || inflightByKey.has(info.key);
     const lastId = m => (m ? `#${m.count - 1}` : '#–');
 
     let state, label, num, tip;
@@ -1520,6 +1560,8 @@ async function backupNow() {
     if (!snap) return toast.warn('ไม่มีแชทที่เปิดอยู่ หรือแชทว่าง');
     pending = null;
     clearTimeout(pendingTimer);
+    captureKey = null;
+    clearTimeout(captureTimer);
     try {
         await writing;
         const r = await store(snap, { force: true, reason: 'manual' });
@@ -1544,6 +1586,8 @@ function startTimer() {
     const min = Number(s.intervalMin) || 0;
     if (!s.enabled || min <= 0) return;
     intervalId = setInterval(() => {
+        // In the background nothing new is shown; leaving the app captures anyway.
+        if (document.visibilityState === 'hidden' || captureKey) return;
         const snap = captureNow();
         if (!snap || lastHashByKey.get(snap.info.key) === snap.hash) return;
         if (pending && pending.info.key !== snap.info.key) flush();
@@ -1594,6 +1638,8 @@ function wireEvents() {
         // Leaving the app: write what's pending (including a change with no message event,
         // e.g. an extension updating chat metadata), then push it off the device if we can.
         if (settings().enabled) {
+            captureKey = null; // captured right here instead
+            clearTimeout(captureTimer);
             const snap = captureNow();
             if (snap && lastHashByKey.get(snap.info.key) !== snap.hash) {
                 if (pending && pending.info.key !== snap.info.key) flush();
@@ -1654,12 +1700,18 @@ const DBX_API = 'https://api.dropboxapi.com';
 const DBX_CONTENT = 'https://content.dropboxapi.com';
 const cloud = {
     token: '', tokenExp: 0,
-    running: false, again: null,
+    running: false, again: null, lockHeld: false,
     lastAt: new Map(),       // key -> ms of this session's last upload (per-chat pacing)
     backoffUntil: 0,
     lastOk: 0, pending: 0, withheld: [], error: '', progress: '',
     soonTimer: null,
+    // Chats whose newest snapshot may not be in Dropbox yet; null = not known, scan them all.
+    unsent: null,
+    // Chats held back (key -> { hash, at, why, kind }): looked at again only when the snapshot
+    // changes, a sync ran, or after HELD_RECHECK_MS — not every tick, each one a full download.
+    held: new Map(),
 };
+const HELD_RECHECK_MS = 10 * 60_000;
 
 // What Dropbox changed since the last full listing (list_folder cursor), minus this device's
 // own writes. Lets the background check cost one small request instead of a full sync.
@@ -1823,41 +1875,67 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
     cloud.running = true;
     cloud.error = '';
     try {
-        const all = await dbAllMeta(); // metadata only, newest first
-        const newest = new Map();
-        for (const m of all) if (!newest.has(m.key)) newest.set(m.key, m);
+        // Snapshots per chat, newest first: every chat once, then only chats written to since.
+        const byKey = new Map();
+        if (!cloud.unsent) {
+            const unsent = new Set();
+            for (const m of await dbAllMeta()) {
+                if (!byKey.has(m.key)) { byKey.set(m.key, []); if (!m.cloud) unsent.add(m.key); }
+                byKey.get(m.key).push(m);
+            }
+            for (const key of [...byKey.keys()]) if (!unsent.has(key)) byKey.delete(key);
+            cloud.unsent = unsent;
+        } else {
+            for (const key of [...cloud.unsent]) byKey.set(key, await dbMetaByKey(key));
+        }
         const gap = Math.max(1, Number(d.intervalMin) || DEFAULTS.dropbox.intervalMin) * 60_000;
         const due = [];
         const withheld = [];
-        for (const [key, m] of newest) {
-            if (m.cloud) continue;
+        for (const [key, list] of byKey) {
+            const m = list[0];
+            if (!m || m.cloud) { cloud.unsent.delete(key); cloud.held.delete(key); continue; }
             const forced = force && (!forceKeys || forceKeys.includes(key));
             if (m.shrunk && !forced) { withheld.push({ key, label: m.label, why: 'แชทสั้นลงผิดปกติ' }); continue; }
+            const held = cloud.held.get(key);
+            if (held && !forced && held.hash === m.hash && Date.now() - held.at < HELD_RECHECK_MS) {
+                withheld.push({ key, label: m.label, why: held.why, kind: held.kind });
+                continue;
+            }
             if (!ignoreGap && !fast && Date.now() - (cloud.lastAt.get(key) || 0) < gap) continue;
-            due.push({ m, forced });
+            due.push({ m, forced, list });
         }
         cloud.pending = due.length;
         renderDbxStatus();
-        for (const { m, forced } of due) {
-            const hold = (why, kind = 'bigger') => { withheld.push({ key: m.key, label: m.label, why, kind }); cloud.pending--; };
+        for (const { m, forced, list } of due) {
+            const hold = (why, kind = 'bigger') => {
+                withheld.push({ key: m.key, label: m.label, why, kind });
+                cloud.held.set(m.key, { hash: m.hash, at: Date.now(), why, kind });
+                cloud.pending--;
+            };
+            cloud.held.delete(m.key);
             let text = await snapshotText(m.id);
+            // Signature made at capture time (keys, sig, meta, count — no message objects).
+            let mine = syncStateCache.get(m.hash) ?? null;
             if (text.includes('"tt_swipe_cold"')) {
                 // TauriTavern "load historical swipes on demand": the chat in memory lacks older
                 // swipes, so send the server's full file instead of the snapshot.
                 const t = syncTargetOf(m.type, m.type === 'group' ? m.groupId : m.avatar, m.chatId);
                 const arr = t.missing ? [] : await serverChat(t);
-                if (chatState(arr).count < m.count) { hold('อ่านแชทฉบับเต็มจากเซิร์ฟเวอร์ไม่ได้'); continue; }
+                mine = chatState(arr);
+                if (mine.count < m.count) { hold('อ่านแชทฉบับเต็มจากเซิร์ฟเวอร์ไม่ได้'); continue; }
                 text = toJsonl(arr);
             }
             const blob = new Blob([text], { type: 'application/octet-stream' });
             const path = dbxPathOf(m);
-            const mine = chatState(parseJsonl(text));
+            mine ??= chatState(parseJsonl(text));
+            const full = () => (mine.msgs ? mine : (mine = chatState(parseJsonl(text)))); // isAncestor reads messages
             let mode = 'overwrite';
             if (!forced) {
                 const remote = await dbxMetadata(path);
                 const markSent = async () => {
                     m.cloud = Date.now();
                     await dbMarkCloud(m.id, m.cloud);
+                    cloud.unsent.delete(m.key);
                     setCloudRecord(m.key, { ts: m.cloud, count: m.count });
                     cloud.pending--;
                 };
@@ -1878,7 +1956,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                             continue;
                         }
                         const rHash = jsonlHash(rText);
-                        const ownOldCopy = !!rHash && all.some(x => x.key === m.key && x.hash === rHash);
+                        const ownOldCopy = !!rHash && list.some(x => x.hash === rHash);
                         if (r.sig === mine.sig) {
                             // Same messages, different chat metadata: send ours only if Dropbox's
                             // metadata hasn't changed since we last matched; otherwise the sync merges.
@@ -1895,7 +1973,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                             }
                             // Messages there unchanged since we last matched (only its header moved on)?
                             const unchanged = base && base.sig === r.sig;
-                            if (!unchanged && !ownOldCopy && !isAncestor(r, mine)) {
+                            if (!unchanged && !ownOldCopy && !isAncestor(r, full())) {
                                 hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
                                 continue;
                             }
@@ -1928,6 +2006,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
             setSyncBase(m.key, { rev: up.rev, sig: mine.sig, meta: mine.meta });
             m.cloud = Date.now();
             await dbMarkCloud(m.id, m.cloud);
+            cloud.unsent.delete(m.key);
             setCloudRecord(m.key, { ts: m.cloud, count: m.count });
             cloud.lastAt.set(m.key, m.cloud);
             updateIndicator();
@@ -1958,7 +2037,7 @@ function cloudSoon() {
 
 /** A change on this device that hasn't reached Dropbox yet (and isn't held back on purpose). */
 function cloudUnsent() {
-    return !!(pending || inflightByKey.size || cloud.soonTimer || (cloud.pending > 0 && (cloud.running || cloud.error)));
+    return !!(captureKey || pending || inflightByKey.size || cloud.soonTimer || (cloud.pending > 0 && (cloud.running || cloud.error)));
 }
 
 /** Download every chat file from Dropbox into local snapshots. */
@@ -2242,10 +2321,15 @@ function setSyncBase(key, rec) {
 
 /** Same layout as msgSig (so describeChanges can read it), but from content only. */
 function syncMsgKey(m) {
+    return syncMsgKeyWith(m, hash(String(m?.mes ?? '')));
+}
+
+/** syncMsgKey with the message text's hash already made (captureNow has it from msgSig). */
+function syncMsgKeyWith(m, mesHash) {
     const sw = Array.isArray(m?.swipes) ? m.swipes.map(x => String(x ?? '')) : null;
     const sid = sw ? Number(m?.swipe_id) || 0 : 0;
     const body = JSON.stringify([String(m?.name ?? ''), !!m?.is_user, !!m?.is_system, String(m?.mes ?? ''), sw, sid]);
-    return `${hash(String(m?.mes ?? ''))}|${sw ? sw.length : 0}|${sid}|${hash(body)}`;
+    return `${mesHash}|${sw ? sw.length : 0}|${sid}|${hash(body)}`;
 }
 
 function parseJsonl(text) {
@@ -2947,7 +3031,9 @@ async function withCloudLock(fn, { wait = true } = {}) {
     for (let i = 0; cloud.running && wait && i < 240; i++) await new Promise(r => setTimeout(r, 250));
     if (cloud.running) return { busy: true };
     cloud.running = true;
+    cloud.lockHeld = true; // a sync or a choice is writing into ST: its own saves aren't changes to send
     try { return await fn(); } finally {
+        cloud.lockHeld = false;
         cloud.running = false;
         renderDbxStatus();
         updateIndicator();
@@ -2987,6 +3073,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
     return await withCloudLock(async () => {
         const out = { applied: [], decisions: [], missing: new Map(), errors: [], itemsApplied: [], itemsSent: 0 };
         sync.error = '';
+        cloud.held.clear(); // what Dropbox holds may have changed: the next upload looks again
         if (!only) watch.localDirty = false;
         setBadge('check', '', { quiet });
         try {
@@ -3155,9 +3242,50 @@ async function syncCheck({ visible = false } = {}) {
 }
 
 /** Something was saved on this device that the full sync uploads (preset, card, lorebook…). */
-function markLocalChange() {
-    if (cloud.running || !dbxConnected() || !dbxSettings().syncAuto) return; // the sync's own writes
+// Item kinds the next sync has to compare again ('preset' 'card' 'wi' 'persona' 'qr' 'rx').
+// All of them at first, so the first sync of a session looks at everything.
+const ITEM_KINDS = ['preset', 'card', 'wi', 'persona', 'qr', 'rx'];
+const itemsDirty = new Set(ITEM_KINDS);
+const kindOfKey = key => (key.startsWith('p:') ? 'preset' : key.slice(0, key.indexOf(':')));
+let itemsFullAt = 0;                          // last sync that compared every kind
+const ITEMS_FULL_EVERY_MS = 30 * 60_000;      // safety net for a change no save request showed
+
+/**
+ * Something of these kinds was saved here. A chat upload holding Dropbox doesn't hide it (only
+ * a sync writing into ST does), so it is never lost; the sync then compares just those kinds.
+ */
+function markLocalChange(kinds = ITEM_KINDS) {
+    if (cloud.lockHeld) return; // the sync's own writes
+    for (const k of kinds) itemsDirty.add(k); // also without auto sync: "ซิงค์ตอนนี้" needs to know
+    if (!dbxConnected() || !dbxSettings().syncAuto) return;
     markLocalChangeNow();
+}
+
+/**
+ * ST saves the card every time a chat is opened (to remember the last chat), and extensions
+ * write their own fields into cards. Only a change to what the sync compares is worth a sync.
+ */
+const cardChecks = new Map(); // avatar -> timer
+function checkCardEdit(avatar) {
+    if (cloud.lockHeld) return;
+    if (!avatar || !dbxConnected() || dbxSettings().syncCards === false) { markLocalChange(['card']); return; }
+    clearTimeout(cardChecks.get(avatar));
+    cardChecks.set(avatar, setTimeout(async () => {
+        cardChecks.delete(avatar);
+        try {
+            const B = itemBase(`card:${avatar}`);
+            if (B && !B.deleted && (await serverCardHash(avatar)) === B.hash) return;
+        } catch { /* can't tell: let the sync look */ }
+        markLocalChange(['card']);
+    }, 1500));
+}
+
+/** The card's content hash, read fresh from the server (same as localCardHash). */
+async function serverCardHash(avatar) {
+    const res = await fetch('/api/characters/get', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar }) });
+    if (!res.ok) throw new Error(String(res.status));
+    const full = await res.json();
+    return cardDataHash(JSON.parse(full?.json_data ?? JSON.stringify({ data: full?.data ?? {} })));
 }
 
 /**
@@ -3165,11 +3293,12 @@ function markLocalChange() {
  * upload, and markLocalChange drops what happens meanwhile. A deletion must not be lost,
  * so wait for the run to end and mark it then (at worst one extra, quiet sync).
  */
-function markDeletion() {
+function markDeletion(kind) {
+    if (kind) itemsDirty.add(kind);
     if (!dbxConnected() || !dbxSettings().syncAuto) return;
     if (!cloud.running) { markLocalChangeNow(); return; }
     clearTimeout(watch.deletionTimer);
-    watch.deletionTimer = setTimeout(markDeletion, 3000);
+    watch.deletionTimer = setTimeout(() => markDeletion(), 3000);
 }
 
 function markLocalChangeNow() {
@@ -3193,32 +3322,56 @@ async function quickRepliesChanged() {
 /** Regex and personas live in settings.json, which ST saves for any setting. */
 function settingsSig() {
     const c = ctx();
-    return hash(stableJson({ rx: c.extensionSettings?.regex ?? null, pd: c.powerUserSettings?.persona_descriptions ?? null, pn: c.powerUserSettings?.personas ?? null }));
+    return {
+        rx: hash(stableJson(c.extensionSettings?.regex ?? null)),
+        persona: hash(stableJson({ pd: c.powerUserSettings?.persona_descriptions ?? null, pn: c.powerUserSettings?.personas ?? null })),
+    };
 }
 
 /** Watch ST's own save requests (also TauriTavern's, which go through the same fetch) and events. */
 function watchLocalSaves() {
-    const SAVES = /\/api\/(presets\/(save|delete)|worldinfo\/(edit|delete|import)|characters\/(edit|edit-attribute|merge-attributes|import|create|rename|delete|duplicate)|avatars\/(upload|delete))\b/;
+    const SAVES = [
+        [/\/api\/presets\/(save|delete)\b/, 'preset'],
+        [/\/api\/worldinfo\/(edit|delete|import)\b/, 'wi'],
+        [/\/api\/characters\/(import|create|rename|delete|duplicate)\b/, 'card'],
+        [/\/api\/avatars\/(upload|delete)\b/, 'persona'],
+    ];
+    const CARD_EDIT = /\/api\/characters\/(edit|edit-attribute|merge-attributes)\b/;
+    const avatarOf = body => {
+        if (typeof FormData !== 'undefined' && body instanceof FormData) return body.get('avatar_url');
+        if (typeof body === 'string') { const j = JSON.parse(body); return j?.avatar_url ?? j?.avatar; }
+        return null;
+    };
     watch.settingsSig = settingsSig();
     const { eventSource, event_types: E } = ctx();
-    for (const ev of ['PRESET_DELETED', 'PRESET_RENAMED', 'CHARACTER_EDITED', 'CHARACTER_RENAMED', 'CHARACTER_DUPLICATED',
-        'WORLDINFO_UPDATED', 'PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED']) {
-        if (E?.[ev]) eventSource.on(E[ev], () => markLocalChange());
-    }
-    if (E?.CHARACTER_DELETED) eventSource.on(E.CHARACTER_DELETED, data => { noteDeletedHere(`card:${data?.character?.avatar ?? ''}`); markDeletion(); });
-    if (E?.PERSONA_DELETED) eventSource.on(E.PERSONA_DELETED, data => { noteDeletedHere(`persona:${data?.avatarId ?? ''}`); markDeletion(); });
+    const on = (ev, fn) => { if (E?.[ev]) eventSource.on(E[ev], fn); };
+    for (const ev of ['PRESET_DELETED', 'PRESET_RENAMED']) on(ev, () => markLocalChange(['preset']));
+    for (const ev of ['CHARACTER_RENAMED', 'CHARACTER_DUPLICATED']) on(ev, () => markLocalChange(['card']));
+    on('CHARACTER_EDITED', data => checkCardEdit(data?.detail?.character?.avatar));
+    on('WORLDINFO_UPDATED', () => markLocalChange(['wi']));
+    for (const ev of ['PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED']) on(ev, () => markLocalChange(['persona']));
+    on('CHARACTER_DELETED', data => { noteDeletedHere(`card:${data?.character?.avatar ?? ''}`); markDeletion('card'); });
+    on('PERSONA_DELETED', data => { noteDeletedHere(`persona:${data?.avatarId ?? ''}`); markDeletion('persona'); });
     const orig = window.fetch;
     window.fetch = function (input, init) {
         const p = orig.apply(this, arguments);
         try {
             const url = typeof input === 'string' ? input : input?.url ?? String(input);
-            // The sync's own writes run under cloud.running; they need no second look.
-            if (!cloud.running && /\/api\//.test(url)) {
-                if (SAVES.test(url)) markLocalChange();
+            // A sync writing into ST holds the lock; its own saves need no second look.
+            if (!cloud.lockHeld && /\/api\//.test(url)) {
+                const kind = SAVES.find(([re]) => re.test(url))?.[1];
+                if (kind) markLocalChange([kind]);
+                else if (CARD_EDIT.test(url)) {
+                    let avatar = null;
+                    try { avatar = avatarOf(init?.body); } catch { /* unreadable body: check anyway */ }
+                    p.then(r => { if (r?.ok) checkCardEdit(avatar); }).catch(() => {});
+                }
                 // The Quick Reply module re-saves sets on its own (e.g. opening a chat): look at the content.
-                else if (/\/api\/quick-replies\/(save|delete)\b/.test(url)) p.then(() => quickRepliesChanged()).then(c => { if (c) markLocalChange(); }).catch(() => {});
+                else if (/\/api\/quick-replies\/(save|delete)\b/.test(url)) p.then(() => quickRepliesChanged()).then(c => { if (c) markLocalChange(['qr']); }).catch(() => {});
                 else if (/\/api\/settings\/save\b/.test(url)) {
-                    if (settingsSig() !== watch.settingsSig) markLocalChange();
+                    const now = settingsSig(), was = watch.settingsSig;
+                    const kinds = ['rx', 'persona'].filter(k => now[k] !== was?.[k]);
+                    if (kinds.length) markLocalChange(kinds);
                 }
             }
         } catch { /* never break ST's request */ }
@@ -4022,6 +4175,7 @@ async function keepDeletedItem(item) {
 
 // Regex scripts run in list order; the order travels as a list of ids in /regexorder.json.
 const REGEX_ORDER_PATH = '/regexorder.json';
+const REGEX_ORDER_KEY = 'rxorder';
 const regexIds = () => (ctx().extensionSettings?.regex || []).map(x => x?.id).filter(Boolean);
 
 /** Put the local scripts in Dropbox's order; scripts Dropbox doesn't list keep their place at the end. */
@@ -4038,7 +4192,7 @@ function applyRegexOrder(ids) {
 
 async function syncRegexOrder(entry, out) {
     if (!Array.isArray(ctx().extensionSettings?.regex)) return;
-    const key = 'rxorder';
+    const key = REGEX_ORDER_KEY;
     const B = itemBase(key);
     const send = async rev => {
         const ids = regexIds();
@@ -4252,107 +4406,139 @@ async function syncItems(entries, out, { auto = false } = {}) {
             regexOrder = e;
         }
     }
-    const local = new Map([
-        ...(doPresets ? localPresets() : []), ...(doCards ? localCards() : []),
-        ...(doWorlds ? await localLorebooks() : []), ...(doPersonas ? localPersonas() : []),
-        ...(doQr ? await localQuickReplies() : []), ...(doRegex ? localRegex() : []),
-    ]);
-    // Quick Reply module unreachable (or waiting for a reload): leave Dropbox's sets alone.
-    const qrReachable = doQr && !!(await quickReplySets());
-    if (doQr && !qrReachable) for (const map of [remote, tombs]) for (const k of [...map.keys()]) if (k.startsWith('qr:')) map.delete(k);
-    // Only trust "missing here" as a deletion when the local list could really be read.
-    const deletesOn = d.syncDeletes !== false;
-    // An empty character / persona list means "not loaded yet", never "all deleted".
-    const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex)
-        : type === 'card' ? (ctx().characters?.length ?? 0) > 0
-        : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
-    const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])];
-    const deleted = deletedHere();
-    const deadline = auto ? Date.now() + 15_000 : Infinity;
-    const cardsApplied = [];
-    for (let i = 0; i < keys.length && Date.now() < deadline; i++) {
-        const key = keys[i];
-        const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
-        if (L && deleted.has(key)) { forgetDeletedHere(key); deleted.delete(key); } // made again here
-        const label = (L || R || T).label;
-        syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
-        try {
-            if (!R && T) {
-                // Deleted on another device.
-                if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
-                if ((L.type === 'card' || L.type === 'persona') && !(await tombIsExplicit(T))) {
-                    // A 2.7.0 marker: maybe just a rename elsewhere. Keep it and send it back up.
-                    await keepDeletedItem(L);
+    // Only kinds that changed: saved here (itemsDirty), or moved in Dropbox since this browser
+    // last matched it. Reading every lorebook, card and preset is the heavy part of a sync.
+    const enabled = { preset: doPresets, card: doCards, wi: doWorlds, persona: doPersonas, qr: doQr, rx: doRegex };
+    const bases = itemBases();
+    const moved = new Set();
+    for (const [key, R] of remote) { const B = bases[key]; if (!B || B.deleted || B.rev !== R.rev) moved.add(kindOfKey(key)); }
+    for (const [key, T] of tombs) { const B = bases[key]; if (!remote.has(key) && !(B?.deleted && B.rev === T.rev)) moved.add(kindOfKey(key)); }
+    for (const [key, B] of Object.entries(bases)) {
+        if (key.includes(':') && !B?.deleted && !remote.has(key) && !tombs.has(key)) moved.add(kindOfKey(key)); // gone from Dropbox
+    }
+    if (bases[REGEX_ORDER_KEY]?.rev !== regexOrder?.rev) moved.add('rx');
+    // "ซิงค์ตอนนี้" compares everything; so does an automatic sync every so often (safety net).
+    if (!auto || Date.now() - itemsFullAt > ITEMS_FULL_EVERY_MS) for (const k of ITEM_KINDS) itemsDirty.add(k);
+    const dirty = new Set(itemsDirty);
+    itemsDirty.clear();
+    const need = new Set(ITEM_KINDS.filter(k => enabled[k] && (dirty.has(k) || moved.has(k))));
+    let finished = false;
+    try {
+        sync.itemScope = [...need]; // shown by syncState(), for checking what a sync looked at
+        if (!need.size) { finished = true; return; }
+        const local = new Map([
+            ...(need.has('preset') ? localPresets() : []), ...(need.has('card') ? localCards() : []),
+            ...(need.has('wi') ? await localLorebooks() : []), ...(need.has('persona') ? localPersonas() : []),
+            ...(need.has('qr') ? await localQuickReplies() : []), ...(need.has('rx') ? localRegex() : []),
+        ]);
+        // Quick Reply module unreachable (or waiting for a reload): leave Dropbox's sets alone.
+        const qrReachable = doQr && !!(await quickReplySets());
+        if (doQr && !qrReachable) for (const map of [remote, tombs]) for (const k of [...map.keys()]) if (k.startsWith('qr:')) map.delete(k);
+        // Only trust "missing here" as a deletion when the local list could really be read.
+        const deletesOn = d.syncDeletes !== false;
+        // An empty character / persona list means "not loaded yet", never "all deleted".
+        const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex)
+            : type === 'card' ? (ctx().characters?.length ?? 0) > 0
+            : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
+        const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])].filter(k => need.has(kindOfKey(k)));
+        const deleted = deletedHere();
+        const deadline = auto ? Date.now() + 15_000 : Infinity;
+        const cardsApplied = [];
+        let i = 0;
+        for (; i < keys.length && Date.now() < deadline; i++) {
+            const key = keys[i];
+            const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
+            if (L && deleted.has(key)) { forgetDeletedHere(key); deleted.delete(key); } // made again here
+            const label = (L || R || T).label;
+            syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
+            try {
+                if (!R && T) {
+                    // Deleted on another device.
+                    if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
+                    if ((L.type === 'card' || L.type === 'persona') && !(await tombIsExplicit(T))) {
+                        // A 2.7.0 marker: maybe just a rename elsewhere. Keep it and send it back up.
+                        await keepDeletedItem(L);
+                        out.itemsSent++;
+                        continue;
+                    }
+                    if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
+                    // Cards and personas are never removed from this device without asking.
+                    if (L.type !== 'card' && L.type !== 'persona' && B && !B.deleted && (await itemHash(L)) === B.hash) {
+                        badgeApply(label);
+                        await deleteItemLocally(L);
+                        setItemBase(key, { deleted: true, rev: T.rev });
+                        out.itemsApplied.push(`ลบ ${label}`);
+                        continue;
+                    }
+                    const waitingDel = sync.decisions.find(x => x.kind === 'itemdel' && x.t.key === key && x.rev === T.rev);
+                    if (!waitingDel || !auto) {
+                        out.decisions.push({ kind: 'itemdel', t: { key, label: L.type === 'card' ? `${label} (${L.avatar})` : label, chatId: '' }, rev: T.rev, item: L, when: Date.parse(T.server_modified) || 0, local: { count: 0 }, remote: { count: 0 } });
+                    } else out.decisions.push(waitingDel);
+                    continue;
+                }
+                if (!R) {
+                    if (!L) continue;
+                    // Not in Dropbox yet (or deleted there): send it.
+                    await uploadItem(L, await itemHash(L), null);
                     out.itemsSent++;
                     continue;
                 }
-                if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
-                // Cards and personas are never removed from this device without asking.
-                if (L.type !== 'card' && L.type !== 'persona' && B && !B.deleted && (await itemHash(L)) === B.hash) {
-                    badgeApply(label);
-                    await deleteItemLocally(L);
-                    setItemBase(key, { deleted: true, rev: T.rev });
-                    out.itemsApplied.push(`ลบ ${label}`);
-                    continue;
-                }
-                const waitingDel = sync.decisions.find(x => x.kind === 'itemdel' && x.t.key === key && x.rev === T.rev);
-                if (!waitingDel || !auto) {
-                    out.decisions.push({ kind: 'itemdel', t: { key, label: L.type === 'card' ? `${label} (${L.avatar})` : label, chatId: '' }, rev: T.rev, item: L, when: Date.parse(T.server_modified) || 0, local: { count: 0 }, remote: { count: 0 } });
-                } else out.decisions.push(waitingDel);
-                continue;
-            }
-            if (!R) {
-                if (!L) continue;
-                // Not in Dropbox yet (or deleted there): send it.
-                await uploadItem(L, await itemHash(L), null);
-                out.itemsSent++;
-                continue;
-            }
-            if (B && B.rev === R.rev) {
-                if (!L) {
-                    // Deleted here since the last match (cards and personas: only when the user deleted it here).
-                    const explicitOnly = R.type === 'card' || R.type === 'persona';
-                    if (DELETABLE[R.type] && deletesOn && listedHere(R.type) && (!explicitOnly || deleted.has(key))) {
-                        await deleteItemEverywhere({ ...R, key });
-                        forgetDeletedHere(key);
-                        out.itemsSent++;
+                if (B && B.rev === R.rev) {
+                    if (!L) {
+                        // Deleted here since the last match (cards and personas: only when the user deleted it here).
+                        const explicitOnly = R.type === 'card' || R.type === 'persona';
+                        if (DELETABLE[R.type] && deletesOn && listedHere(R.type) && (!explicitOnly || deleted.has(key))) {
+                            await deleteItemEverywhere({ ...R, key });
+                            forgetDeletedHere(key);
+                            out.itemsSent++;
+                        }
+                        continue;
                     }
+                    const lh = await itemHash(L);
+                    if (lh !== B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; }
                     continue;
                 }
-                const lh = await itemHash(L);
-                if (lh !== B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; }
-                continue;
+                const waiting = sync.decisions.find(x => x.kind === 'item' && x.t.key === key && x.rev === R.rev);
+                if (waiting && auto) { out.decisions.push(waiting); continue; }
+                const content = await downloadItem(R);
+                if (R.type === 'persona' && content.obj?.name) R.label = `Persona: ${content.obj.name}`;
+                if (R.type === 'rx' && content.obj?.scriptName) R.label = `Regex: ${content.obj.scriptName}`;
+                const lh = L ? await itemHash(L) : null;
+                if (lh === content.hash) { setItemBase(key, { rev: R.rev, hash: lh }); continue; }
+                if (!L || (B && lh === B.hash)) {
+                    badgeApply(L?.label ?? R.label);
+                    await applyItem(R, content, L);
+                    setItemBase(key, { rev: R.rev, hash: content.hash });
+                    if (R.type === 'card') cardsApplied.push({ key, rev: R.rev });
+                    out.itemsApplied.push(L?.label ?? R.label);
+                    continue;
+                }
+                if (B && content.hash === B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; continue; }
+                out.decisions.push({
+                    kind: 'item', t: { key, label, chatId: '' }, rev: R.rev, entry: R, item: L,
+                    when: Date.parse(R.client_modified) || Date.parse(R.server_modified) || 0,
+                    local: { count: 0 }, remote: { count: 0 },
+                });
+            } catch (e) {
+                console.warn(LOG, 'item sync', key, e);
+                out.errors.push(`${label}: ${e?.message ?? e}`);
+                if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
             }
-            const waiting = sync.decisions.find(x => x.kind === 'item' && x.t.key === key && x.rev === R.rev);
-            if (waiting && auto) { out.decisions.push(waiting); continue; }
-            const content = await downloadItem(R);
-            if (R.type === 'persona' && content.obj?.name) R.label = `Persona: ${content.obj.name}`;
-            if (R.type === 'rx' && content.obj?.scriptName) R.label = `Regex: ${content.obj.scriptName}`;
-            const lh = L ? await itemHash(L) : null;
-            if (lh === content.hash) { setItemBase(key, { rev: R.rev, hash: lh }); continue; }
-            if (!L || (B && lh === B.hash)) {
-                badgeApply(L?.label ?? R.label);
-                await applyItem(R, content, L);
-                setItemBase(key, { rev: R.rev, hash: content.hash });
-                if (R.type === 'card') cardsApplied.push({ key, rev: R.rev });
-                out.itemsApplied.push(L?.label ?? R.label);
-                continue;
-            }
-            if (B && content.hash === B.hash) { await uploadItem(L, lh, R.rev); out.itemsSent++; continue; }
-            out.decisions.push({
-                kind: 'item', t: { key, label, chatId: '' }, rev: R.rev, entry: R, item: L,
-                when: Date.parse(R.client_modified) || Date.parse(R.server_modified) || 0,
-                local: { count: 0 }, remote: { count: 0 },
-            });
-        } catch (e) {
-            console.warn(LOG, 'item sync', key, e);
-            out.errors.push(`${label}: ${e?.message ?? e}`);
-            if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
         }
-    }
-    await refreshCardsAfter(cardsApplied);
-    if (doRegex && Date.now() < deadline) {
-        try { await syncRegexOrder(regexOrder, out); } catch (e) { out.errors.push(`ลำดับ regex: ${e?.message ?? e}`); }
+        await refreshCardsAfter(cardsApplied);
+        if (need.has('rx') && Date.now() < deadline) {
+            try { await syncRegexOrder(regexOrder, out); } catch (e) { out.errors.push(`ลำดับ regex: ${e?.message ?? e}`); }
+        }
+        finished = i >= keys.length;
+        if (finished) {
+            // Matched once, now gone from both sides: nothing left to compare.
+            for (const [key, B] of Object.entries(bases)) {
+                if (key.includes(':') && need.has(kindOfKey(key)) && !B?.deleted && !remote.has(key) && !tombs.has(key) && !local.has(key)) setItemBase(key, null);
+            }
+            if (ITEM_KINDS.every(k => !enabled[k] || need.has(k))) itemsFullAt = Date.now();
+        }
+    } finally {
+        if (!finished) for (const k of dirty) itemsDirty.add(k); // cut short (time limit, error): look again next time
     }
 }
 
@@ -4614,7 +4800,7 @@ globalThis.ChatAutoBackup = {
     api: 2,
     dropboxConnected: () => dbxConnected(),
     syncInUse: () => dbxConnected() && !!dbxSettings().syncSince,
-    syncState: () => ({ running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
+    syncState: () => ({ itemScope: sync.itemScope ?? null, running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
     cloudInfo: key => (dbxConnected() ? { sent: cloudRecord(key), base: syncBase(key) } : null),
     cleanSyncPlan, cleanSyncApply, cleanLog, cleanRestore, onChatRenamed, noteServerChange,
 };
