@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.7.1'; // keep in sync with manifest.json
+const VERSION = '2.7.2'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -3371,7 +3371,7 @@ const SYNC_KIND = {
     gone: { title: 'แชทนี้ถูกลบในเครื่องนี้', why: 'เคยซิงค์แชทนี้แล้ว แต่ตอนนี้ไม่มีในเซิร์ฟเวอร์นี้ (ลบหรือเปลี่ยนชื่อ)' },
     new: { title: 'มีบน Dropbox แต่ไม่มีในเครื่องนี้', why: 'แชทที่สร้างจากเครื่องอื่นก่อนเริ่มใช้การซิงค์ที่นี่ หรือเคยลบไปแล้ว' },
     deleted: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบแชทนี้แล้ว แต่ที่นี่มีการแก้หลังซิงค์ครั้งล่าสุด หรือเปิดแชทนี้อยู่' },
-    itemdel: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบไปแล้ว แต่ที่นี่มีการแก้หลังซิงค์ครั้งล่าสุด (หรือยังไม่เคยซิงค์)' },
+    itemdel: { title: 'ถูกลบที่อีกเครื่อง', why: 'อีกเครื่องลบไปแล้ว เลือกว่าจะลบในเครื่องนี้ด้วยหรือเก็บไว้ (การ์ดและ persona จะไม่ถูกลบในเครื่องนี้โดยไม่ถามก่อน)' },
     item: { title: 'แก้ทั้งสองฝั่ง', why: 'แก้ทั้งในเครื่องนี้และจากอีกเครื่อง หลังจากซิงค์กันครั้งล่าสุด (หรือเพิ่งเริ่มซิงค์และสองฝั่งไม่ตรงกัน)' },
 };
 
@@ -3444,7 +3444,10 @@ function showSyncDecisions() {
         }).join('');
         const nNew = items.filter(x => x.kind === 'new').length;
         const nGone = items.filter(x => x.kind === 'gone').length;
+        const nDel = items.filter(x => x.kind === 'itemdel').length;
         const bulk = [
+            nDel > 1 && `<div class="menu_button" data-bulk="ikeepall">เก็บไว้ทั้งหมด: ที่ถูกลบที่อีกเครื่อง (${nDel})</div>`,
+            nDel > 1 && `<div class="menu_button" data-bulk="idelall">ลบในเครื่องนี้ทั้งหมด: ที่ถูกลบที่อีกเครื่อง (${nDel})</div>`,
             nNew > 1 && `<div class="menu_button" data-bulk="create">สร้างที่มีบน Dropbox ทั้งหมด (${nNew})</div>`,
             nNew + nGone > 1 && `<div class="menu_button" data-bulk="purge">ลบทุกเครื่อง: แชทที่ไม่มีในเครื่องนี้ทั้งหมด (${nNew + nGone})</div>`,
             nNew > 1 && `<div class="menu_button" data-bulk="skip">ข้ามทั้งหมด (${nNew})</div>`,
@@ -3500,6 +3503,21 @@ function showSyncDecisions() {
         });
         wrap.querySelectorAll('[data-bulk]').forEach(btn => {
             btn.addEventListener('click', act(btn, async () => {
+                if (btn.dataset.bulk === 'ikeepall' || btn.dataset.bulk === 'idelall') {
+                    const del = btn.dataset.bulk === 'idelall';
+                    const list = sync.decisions.filter(x => x.kind === 'itemdel');
+                    if (del && !confirm(`ลบ ${list.length} รายการนี้ในเครื่องนี้ด้วย?\n${list.map(x => x.t.label).join('\n')}`)) return;
+                    for (let i = 0; i < list.length; i++) {
+                        btn.textContent = `${del ? 'กำลังลบ' : 'กำลังเก็บ'} ${i + 1}/${list.length}…`;
+                        const x = list[i];
+                        const fresh = (await localItemsOf(x.item.type)).get(x.t.key);
+                        if (fresh) {
+                            if (del) { await deleteItemLocally(fresh); setItemBase(x.t.key, { deleted: true, rev: x.rev }); } else await keepDeletedItem(fresh);
+                        }
+                        done(x);
+                    }
+                    return;
+                }
                 if (btn.dataset.bulk === 'purge') {
                     const gone = sync.decisions.filter(x => x.kind === 'new' || x.kind === 'gone');
                     if (!confirm(`ลบ ${gone.length} แชทที่ไม่มีในเครื่องนี้ ออกจาก Dropbox?\nเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าที่นั่นไม่ได้แก้แชทนั้น ถ้าแก้จะถามก่อน)`)) return;
@@ -4269,7 +4287,8 @@ async function syncItems(entries, out, { auto = false } = {}) {
                     continue;
                 }
                 if (B?.deleted && B.rev === T.rev) { await keepDeletedItem(L); out.itemsSent++; continue; } // made again here since
-                if (B && !B.deleted && (await itemHash(L)) === B.hash && !(await inUseHere(L))) {
+                // Cards and personas are never removed from this device without asking.
+                if (L.type !== 'card' && L.type !== 'persona' && B && !B.deleted && (await itemHash(L)) === B.hash) {
                     badgeApply(label);
                     await deleteItemLocally(L);
                     setItemBase(key, { deleted: true, rev: T.rev });
@@ -4278,7 +4297,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
                 }
                 const waitingDel = sync.decisions.find(x => x.kind === 'itemdel' && x.t.key === key && x.rev === T.rev);
                 if (!waitingDel || !auto) {
-                    out.decisions.push({ kind: 'itemdel', t: { key, label, chatId: '' }, rev: T.rev, item: L, when: Date.parse(T.server_modified) || 0, local: { count: 0 }, remote: { count: 0 } });
+                    out.decisions.push({ kind: 'itemdel', t: { key, label: L.type === 'card' ? `${label} (${L.avatar})` : label, chatId: '' }, rev: T.rev, item: L, when: Date.parse(T.server_modified) || 0, local: { count: 0 }, remote: { count: 0 } });
                 } else out.decisions.push(waitingDel);
                 continue;
             }
