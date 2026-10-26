@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.8.0'; // keep in sync with manifest.json
+const VERSION = '2.8.1'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1722,6 +1722,7 @@ const watch = {
     localDirty: false,       // a preset, card, lorebook… was saved here since the last full sync
     lastCheck: 0,
     settingsSig: '',
+    cardSig: '',
 };
 function noteOwn(m) { if (m?.rev) watch.ownRevs.add(m.rev); }
 
@@ -3137,6 +3138,9 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         renderSyncStatus();
         badgeFinish(out.applied.length + out.itemsApplied.length);
         watch.settingsSig = settingsSig(); // regex/personas it wrote are not "saved here"
+        watch.cardSig = cardListSig();      // nor are the cards it imported
+        // Items cut short (time limit): carry on at the next check, not only when something changes.
+        if (out.itemsMore) watch.localDirty = true;
         watch.lastCheck = Date.now();
         if (out.applied.length) notifySynced('sync');
         return out;
@@ -3216,6 +3220,7 @@ async function syncCheck({ visible = false } = {}) {
     if (cloud.running) { if (visible) setTimeout(() => syncCheck({ visible }), 2000); return; }
     if (visible && Date.now() - watch.lastCheck < 5_000) return;
     watch.lastCheck = Date.now();
+    noteCardListChange();
     if (!watch.cursor || watch.localDirty) { syncSoon(visible ? 300 : 0, { quiet: !visible }); return; }
     if (visible) setBadge('check', '', { quiet: false });
     let changed = false, cursor = watch.cursor;
@@ -3328,6 +3333,18 @@ function settingsSig() {
     };
 }
 
+/** Which cards ST lists. A card added by a request the hooks below don't see still shows here. */
+function cardListSig() {
+    return hash((ctx().characters || []).map(ch => ch?.avatar ?? '').sort().join('\n'));
+}
+
+function noteCardListChange() {
+    const now = cardListSig();
+    if (now === watch.cardSig) return;
+    watch.cardSig = now;
+    markLocalChange(['card']);
+}
+
 /** Watch ST's own save requests (also TauriTavern's, which go through the same fetch) and events. */
 function watchLocalSaves() {
     const SAVES = [
@@ -3352,31 +3369,56 @@ function watchLocalSaves() {
     for (const ev of ['PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED']) on(ev, () => markLocalChange(['persona']));
     on('CHARACTER_DELETED', data => { noteDeletedHere(`card:${data?.character?.avatar ?? ''}`); markDeletion('card'); });
     on('PERSONA_DELETED', data => { noteDeletedHere(`persona:${data?.avatarId ?? ''}`); markDeletion('persona'); });
+    watch.cardSig = cardListSig();
+    // `done` resolves to whether the request succeeded.
+    const noteRequest = (url, body, done) => {
+        try {
+            // A sync writing into ST holds the lock; its own saves need no second look.
+            if (cloud.lockHeld || !/\/api\//.test(url)) return;
+            const kind = SAVES.find(([re]) => re.test(url))?.[1];
+            if (kind) markLocalChange([kind]);
+            else if (CARD_EDIT.test(url)) {
+                let avatar = null;
+                try { avatar = avatarOf(body); } catch { /* unreadable body: check anyway */ }
+                done.then(ok => { if (ok) checkCardEdit(avatar); }).catch(() => {});
+            }
+            // The Quick Reply module re-saves sets on its own (e.g. opening a chat): look at the content.
+            else if (/\/api\/quick-replies\/(save|delete)\b/.test(url)) done.then(() => quickRepliesChanged()).then(c => { if (c) markLocalChange(['qr']); }).catch(() => {});
+            else if (/\/api\/settings\/save\b/.test(url)) {
+                const now = settingsSig(), was = watch.settingsSig;
+                const kinds = ['rx', 'persona'].filter(k => now[k] !== was?.[k]);
+                if (kinds.length) markLocalChange(kinds);
+            }
+        } catch { /* never break ST's request */ }
+    };
     const orig = window.fetch;
     window.fetch = function (input, init) {
         const p = orig.apply(this, arguments);
         try {
             const url = typeof input === 'string' ? input : input?.url ?? String(input);
-            // A sync writing into ST holds the lock; its own saves need no second look.
-            if (!cloud.lockHeld && /\/api\//.test(url)) {
-                const kind = SAVES.find(([re]) => re.test(url))?.[1];
-                if (kind) markLocalChange([kind]);
-                else if (CARD_EDIT.test(url)) {
-                    let avatar = null;
-                    try { avatar = avatarOf(init?.body); } catch { /* unreadable body: check anyway */ }
-                    p.then(r => { if (r?.ok) checkCardEdit(avatar); }).catch(() => {});
-                }
-                // The Quick Reply module re-saves sets on its own (e.g. opening a chat): look at the content.
-                else if (/\/api\/quick-replies\/(save|delete)\b/.test(url)) p.then(() => quickRepliesChanged()).then(c => { if (c) markLocalChange(['qr']); }).catch(() => {});
-                else if (/\/api\/settings\/save\b/.test(url)) {
-                    const now = settingsSig(), was = watch.settingsSig;
-                    const kinds = ['rx', 'persona'].filter(k => now[k] !== was?.[k]);
-                    if (kinds.length) markLocalChange(kinds);
-                }
-            }
+            noteRequest(url, init?.body, p.then(r => !!r?.ok));
         } catch { /* never break ST's request */ }
         return p;
     };
+    // Older SillyTavern versions (often what a host runs) create, import and edit cards with
+    // jQuery.ajax, which goes through XMLHttpRequest instead of fetch.
+    const XHR = window.XMLHttpRequest?.prototype;
+    if (XHR) {
+        const open = XHR.open, send = XHR.send;
+        XHR.open = function (method, url) {
+            try { this.cabUrl = String(url); } catch { /* ignore */ }
+            return open.apply(this, arguments);
+        };
+        XHR.send = function (body) {
+            try {
+                if (this.cabUrl) {
+                    const done = new Promise(res => this.addEventListener('loadend', () => res(this.status >= 200 && this.status < 300)));
+                    noteRequest(this.cabUrl, body, done);
+                }
+            } catch { /* never break ST's request */ }
+            return send.apply(this, arguments);
+        };
+    }
 }
 
 function renderSyncStatus() {
@@ -4530,6 +4572,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
             try { await syncRegexOrder(regexOrder, out); } catch (e) { out.errors.push(`ลำดับ regex: ${e?.message ?? e}`); }
         }
         finished = i >= keys.length;
+        out.itemsMore = !finished;
         if (finished) {
             // Matched once, now gone from both sides: nothing left to compare.
             for (const [key, B] of Object.entries(bases)) {
