@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.9.1'; // keep in sync with manifest.json
+const VERSION = '2.9.2'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1705,6 +1705,7 @@ const DBX_CONTENT = 'https://content.dropboxapi.com';
 const cloud = {
     token: '', tokenExp: 0,
     running: false, again: null, lockHeld: false,
+    yieldAt: 0, // when a sync last asked for Dropbox: the upload stops after the chat it is on
     lastAt: new Map(),       // key -> ms of this session's last upload (per-chat pacing)
     backoffUntil: 0,
     lastOk: 0, pending: 0, withheld: [], error: '', progress: '',
@@ -1778,11 +1779,25 @@ async function dbxError(res) {
     try { const j = JSON.parse(t); return j.error_summary || j.error_description || j.error || t; } catch { return t || `${res.status} ${res.statusText}`; }
 }
 
+/** fetch that gives up after `ms`: a request the network dropped silently must not hold Dropbox forever. */
+async function fetchTimeout(url, init = {}, ms = 60_000) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), ms);
+    try {
+        return await fetch(url, { ...init, signal: ac.signal });
+    } catch (e) {
+        if (ac.signal.aborted) throw new Error('Dropbox ไม่ตอบ (หมดเวลา) — จะลองใหม่รอบหน้า');
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function dbxToken() {
     if (cloud.token && Date.now() < cloud.tokenExp - 60_000) return cloud.token;
     const d = dbxSettings();
     if (!d.refreshToken) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
-    const res = await fetch(`${DBX_API}/oauth2/token`, {
+    const res = await fetchTimeout(`${DBX_API}/oauth2/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: d.refreshToken, client_id: d.appKey }),
@@ -1805,7 +1820,9 @@ async function dbxToken() {
 
 async function dbxFetch(url, init = {}, retry = true) {
     const token = await dbxToken();
-    const res = await fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+    // File transfers may take a while on a slow phone connection; everything else answers quickly.
+    const ms = url.startsWith(DBX_CONTENT) ? 180_000 : 60_000;
+    const res = await fetchTimeout(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } }, ms);
     if (res.status === 401 && retry) { cloud.token = ''; return dbxFetch(url, init, false); }
     if (res.status === 429) {
         cloud.backoffUntil = Date.now() + (Number(res.headers.get('Retry-After')) || 60) * 1000;
@@ -1912,6 +1929,8 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
         cloud.pending = due.length;
         renderDbxStatus();
         for (const { m, forced, list } of due) {
+            // A waiting sync goes first; the chats left stay unsent and go up right after it.
+            if (syncWaiting() && !force) { cloud.again = { ...(cloud.again || {}), fast: true }; break; }
             const hold = (why, kind = 'bigger') => {
                 withheld.push({ key: m.key, label: m.label, why, kind });
                 cloud.held.set(m.key, { hash: m.hash, at: Date.now(), why, kind });
@@ -2028,9 +2047,13 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
         cloud.running = false;
         renderDbxStatus();
         updateIndicator();
-        if (cloud.again) { const a = cloud.again; cloud.again = null; setTimeout(() => cloudTick(a), 1000); }
+        // Stopped for a waiting sync: that sync picks the rest up when it releases Dropbox.
+        if (cloud.again && !syncWaiting()) { const a = cloud.again; cloud.again = null; setTimeout(() => cloudTick(a), 1000); }
     }
 }
+
+/** A sync asked for Dropbox lately (it retries every few seconds; a stale ask doesn't count). */
+const syncWaiting = () => Date.now() - cloud.yieldAt < 30_000;
 
 /** After a snapshot is written: sync shortly (pacing still applies). */
 function cloudSoon() {
@@ -3038,8 +3061,10 @@ function syncSkip(item) {
 
 /** Run fn while no upload or other sync touches Dropbox. */
 async function withCloudLock(fn, { wait = true } = {}) {
+    if (cloud.running) cloud.yieldAt = Date.now(); // an upload stops after its current chat
     for (let i = 0; cloud.running && wait && i < 240; i++) await new Promise(r => setTimeout(r, 250));
     if (cloud.running) return { busy: true };
+    cloud.yieldAt = 0;
     cloud.running = true;
     cloud.lockHeld = true; // a sync or a choice is writing into ST: its own saves aren't changes to send
     try { return await fn(); } finally {
@@ -3266,7 +3291,12 @@ function syncSoon(delay = 2000, { quiet = false } = {}) {
         if (wait > 0) { syncSoon(wait, { quiet }); return; } // just synced: do it once the pause is over
         try {
             const r = await syncPull({ auto: true, quiet });
-            if (r?.busy) { syncSoon(3000, { quiet }); return; } // an upload holds Dropbox: try again shortly
+            if (r?.busy) {
+                // An upload holds Dropbox: ask it to stop after its current chat, then try again shortly.
+                if (!quiet) setBadge('pending', `รอส่งแชทขึ้น Dropbox ให้เสร็จก่อน${cloud.pending > 0 ? ` (เหลือ ${cloud.pending})` : ''}…`, { quiet });
+                syncSoon(3000, { quiet });
+                return;
+            }
             syncReport(r, { quiet: true });
         } catch (e) {
             sync.error = String(e?.message ?? e);
