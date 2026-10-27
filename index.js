@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.9.0'; // keep in sync with manifest.json
+const VERSION = '2.9.1'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1475,6 +1475,7 @@ function renderSettings() {
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
                         <div id="cab_sync_decide" class="menu_button" hidden>เลือกฉบับ</div>
+                        <div id="cab_sync_cpdupes" class="menu_button" hidden title="Connection profile ชื่อเดียวกันแต่ตั้งค่าต่างกัน เลือกว่าจะเก็บอันไหน">Connection profile ชื่อซ้ำ</div>
                         <div id="cab_sync_cpkeys" class="menu_button" hidden title="Connection profile ที่มาจากอีกเครื่องและยังไม่มี API key ในเครื่องนี้">ใส่ API key ให้ profile</div>
                         <div id="cab_sync_orphans" class="menu_button" hidden title="แชทใน Dropbox ของตัวละครที่ไม่มีทั้งในเครื่องนี้และใน Dropbox (เช่น ลบตัวละครไปแล้ว) Dropbox เก็บไฟล์ที่ลบไว้ให้กู้ได้ประมาณ 30 วัน">ลบแชทที่ข้ามออกจาก Dropbox</div>
                         <div id="cab_sync_undelete" class="menu_button" title="การ์ดและ persona ที่ถูกลบผ่านการซิงค์ เลือกแล้วกู้กลับมาได้ทุกเครื่อง (Dropbox เก็บไฟล์ที่ลบไว้ประมาณ 30 วัน)">กู้การ์ด/persona ที่ถูกลบ</div>
@@ -2256,6 +2257,7 @@ function wireDbxPanel() {
     }));
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
     $('cab_sync_orphans').addEventListener('click', run($('cab_sync_orphans'), () => removeOrphanChats()));
+    $('cab_sync_cpdupes').addEventListener('click', () => { showCpDupesDialog().catch(e => toast.err(String(e?.message ?? e), 'Connection profile')); });
     $('cab_sync_cpkeys').addEventListener('click', () => { showCpKeyDialog().catch(e => toast.err(String(e?.message ?? e), 'Connection profile')); });
     $('cab_sync_undelete').addEventListener('click', () => { showDeletedItems().catch(e => toast.err(String(e?.message ?? e), 'ซิงค์')); });
     $('cab_sync_presets').checked = d.syncPresets !== false;
@@ -3495,6 +3497,12 @@ function watchLocalSaves() {
 
 function renderSyncStatus() {
     if (badge.phase === 'decide') { if (sync.decisions.length) renderSyncBadge(); else setBadge('done'); }
+    const dupBtn = document.getElementById('cab_sync_cpdupes');
+    if (dupBtn) {
+        const n = sync.cpDupes?.length || 0;
+        dupBtn.hidden = !n;
+        dupBtn.textContent = `Connection profile ชื่อซ้ำ (${n})`;
+    }
     const keyBtn = document.getElementById('cab_sync_cpkeys');
     if (keyBtn) {
         const n = dbxConnected() ? Object.keys(cpKeysNeeded()).length : 0;
@@ -4166,6 +4174,101 @@ function setCpKeyNeeded(id, rec) {
         if (rec) all[id] = rec; else delete all[id];
         localStorage.setItem(cpKeyStoreKey(), JSON.stringify(all));
     } catch { /* storage unavailable: the dialog just won't come back by itself */ }
+}
+
+/**
+ * Profiles made separately on each device under the same name get different ids, so after a
+ * sync each device has both. Same name and same settings: keep one — the smallest id, so every
+ * device keeps the same one — and remove the rest everywhere. Same name, different settings:
+ * the user picks (sync.cpDupes, panel button).
+ */
+const cpContent = obj => cpHash({ ...obj, id: null });
+function cpGroupsByName() {
+    const groups = new Map();
+    for (const p of connProfiles() || []) {
+        if (!p?.id) continue;
+        const name = String(p.name ?? '').trim();
+        if (!groups.has(name)) groups.set(name, []);
+        groups.get(name).push(p);
+    }
+    return [...groups.values()].filter(g => g.length > 1).map(g => g.sort((a, b) => String(a.id).localeCompare(String(b.id))));
+}
+
+/** Keep `keep`, remove the others here and in Dropbox (with markers so other devices follow). */
+async function mergeConnProfiles(keep, others) {
+    const cm = ctx().extensionSettings.connectionManager;
+    for (const o of others) {
+        if (!keep[CP_LOCAL_ONLY] && o[CP_LOCAL_ONLY]) keep[CP_LOCAL_ONLY] = o[CP_LOCAL_ONLY]; // keep this side's key
+        if (cm.selectedProfile === o.id) cm.selectedProfile = keep.id;
+        const item = { key: `cp:${o.id}`, type: 'cp', id: o.id, label: `Connection profile: ${o.name}` };
+        await deleteItemLocally(item);
+        await deleteItemEverywhere(item);
+        setCpKeyNeeded(o.id, null);
+    }
+    ctx().saveSettingsDebounced();
+    renderConnProfileList();
+}
+
+async function dedupeConnProfiles(out) {
+    const differ = [];
+    for (const g of cpGroupsByName()) {
+        if (new Set(g.map(cpContent)).size === 1) {
+            await mergeConnProfiles(g[0], g.slice(1));
+            out.itemsApplied.push(`รวม Connection profile ซ้ำ: ${g[0].name}`);
+        } else {
+            differ.push(g.map(p => p.id));
+        }
+    }
+    sync.cpDupes = differ;
+}
+
+async function showCpDupesDialog() {
+    const groups = cpGroupsByName();
+    if (!groups.length) { sync.cpDupes = []; renderSyncStatus(); toast.info('ไม่มี Connection profile ชื่อซ้ำแล้ว', 'Connection profile'); return; }
+    const fields = ['api', 'api-url', 'model', 'preset', 'proxy', 'instruct', 'context', 'sysprompt', 'tokenizer'];
+    const describe = p => fields.filter(f => p[f]).map(f => `${f}: ${escapeHtml(String(p[f]))}`).join(' · ') || '(ไม่มีค่าที่ตั้งไว้)';
+    const { wrap, close } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>Connection profile ชื่อซ้ำ</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list">
+                <p class="cab_note">profile เหล่านี้ชื่อเดียวกันแต่ตั้งค่าต่างกัน (มักเกิดจากสร้างแยกกันในแต่ละเครื่องก่อนเปิดซิงค์) เลือกอันที่จะเก็บ อันอื่นจะถูกลบจากเครื่องนี้ Dropbox และเครื่องอื่น</p>
+                ${groups.map((g, gi) => `
+                <section class="cab_problem" data-g="${gi}">
+                    <h4>${escapeHtml(g[0].name)}</h4>
+                    ${g.map((p, pi) => `<label class="checkbox_label"><input type="radio" name="cab_cpdup_${gi}" value="${pi}"${pi === 0 ? ' checked' : ''}> ${describe(p)}${p.id === ctx().extensionSettings.connectionManager?.selectedProfile ? ' <small class="cab_note">(ใช้อยู่)</small>' : ''}</label>`).join('')}
+                    <div class="cab_buttons">
+                        <div class="menu_button cab_primary" data-a="keep">เก็บอันที่เลือก ลบที่เหลือ</div>
+                        <div class="menu_button" data-a="leave">เก็บไว้ทั้งหมด</div>
+                    </div>
+                </section>`).join('')}
+            </div>
+        </div>`);
+    for (const sec of wrap.querySelectorAll('section[data-g]')) {
+        const gi = Number(sec.dataset.g);
+        const done = () => { sec.remove(); if (!wrap.querySelector('section[data-g]')) close(); };
+        sec.addEventListener('click', async e => {
+            const a = e.target?.dataset?.a;
+            if (!a || e.target.classList.contains('disabled')) return;
+            if (a === 'leave') { done(); return; }
+            const g = groups[gi];
+            const keep = g[Number(sec.querySelector('input:checked')?.value ?? 0)];
+            e.target.classList.add('disabled');
+            try {
+                const r = await withCloudLock(() => mergeConnProfiles(keep, g.filter(p => p !== keep)));
+                if (r?.busy) throw new Error('Dropbox กำลังทำงานอื่นอยู่ — ลองอีกครั้งในอีกสักครู่');
+                sync.cpDupes = (sync.cpDupes || []).filter(ids => !ids.includes(keep.id));
+                renderSyncStatus();
+                toast.ok(`เก็บ "${keep.name}" ไว้อันเดียวแล้ว`, 'Connection profile');
+                done();
+            } catch (err) {
+                toast.err(String(err?.message ?? err), 'Connection profile');
+                e.target.classList.remove('disabled');
+            }
+        });
+    }
 }
 
 let secretsModule;
@@ -4899,6 +5002,9 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 out.errors.push(`${label}: ${e?.message ?? e}`);
                 if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
             }
+        }
+        if (need.has('cp')) {
+            try { await dedupeConnProfiles(out); } catch (e) { out.errors.push(`Connection profile ซ้ำ: ${e?.message ?? e}`); }
         }
         const notListed = await refreshCardsAfter(cardsApplied);
         if (notListed.length) out.errors.push(`นำเข้าการ์ดแล้วแต่ไม่ขึ้นในรายการตัวละคร: ${notListed.map(x => x.replace(/^card:/, '')).join(', ')}`);
