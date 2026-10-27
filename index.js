@@ -1475,6 +1475,7 @@ function renderSettings() {
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
                         <div id="cab_sync_decide" class="menu_button" hidden>เลือกฉบับ</div>
+                        <div id="cab_sync_cpkeys" class="menu_button" hidden title="Connection profile ที่มาจากอีกเครื่องและยังไม่มี API key ในเครื่องนี้">ใส่ API key ให้ profile</div>
                         <div id="cab_sync_orphans" class="menu_button" hidden title="แชทใน Dropbox ของตัวละครที่ไม่มีทั้งในเครื่องนี้และใน Dropbox (เช่น ลบตัวละครไปแล้ว) Dropbox เก็บไฟล์ที่ลบไว้ให้กู้ได้ประมาณ 30 วัน">ลบแชทที่ข้ามออกจาก Dropbox</div>
                         <div id="cab_sync_undelete" class="menu_button" title="การ์ดและ persona ที่ถูกลบผ่านการซิงค์ เลือกแล้วกู้กลับมาได้ทุกเครื่อง (Dropbox เก็บไฟล์ที่ลบไว้ประมาณ 30 วัน)">กู้การ์ด/persona ที่ถูกลบ</div>
                     </div>
@@ -2255,6 +2256,7 @@ function wireDbxPanel() {
     }));
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
     $('cab_sync_orphans').addEventListener('click', run($('cab_sync_orphans'), () => removeOrphanChats()));
+    $('cab_sync_cpkeys').addEventListener('click', () => { showCpKeyDialog().catch(e => toast.err(String(e?.message ?? e), 'Connection profile')); });
     $('cab_sync_undelete').addEventListener('click', () => { showDeletedItems().catch(e => toast.err(String(e?.message ?? e), 'ซิงค์')); });
     $('cab_sync_presets').checked = d.syncPresets !== false;
     $('cab_sync_presets').addEventListener('change', e => { d.syncPresets = e.target.checked; saveSettings(); });
@@ -3184,6 +3186,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         if (out.itemsMore) watch.localDirty = true;
         watch.lastCheck = Date.now();
         if (out.applied.length) notifySynced('sync');
+        if (cpKeysAsked) { cpKeysAsked = false; setTimeout(() => showCpKeyDialog().catch(e => console.warn(LOG, e)), 300); }
         return out;
     }, { wait: !auto });
 }
@@ -3492,6 +3495,12 @@ function watchLocalSaves() {
 
 function renderSyncStatus() {
     if (badge.phase === 'decide') { if (sync.decisions.length) renderSyncBadge(); else setBadge('done'); }
+    const keyBtn = document.getElementById('cab_sync_cpkeys');
+    if (keyBtn) {
+        const n = dbxConnected() ? Object.keys(cpKeysNeeded()).length : 0;
+        keyBtn.hidden = !n;
+        keyBtn.textContent = `ใส่ API key ให้ profile (${n})`;
+    }
     const orphanBtn = document.getElementById('cab_sync_orphans');
     if (orphanBtn) {
         const n = sync.orphans?.length || 0;
@@ -3971,6 +3980,7 @@ const personaHash = obj => hash(stableJson(lean({ name: obj?.name, descriptor: o
 const itemHash = item => (item.type === 'preset' ? presetHash(item.obj)
     : item.type === 'card' ? localCardHash(item)
     : item.type === 'persona' ? personaHash(item.obj)
+    : item.type === 'cp' ? cpHash(item.obj)
     : hash(stableJson(lean(item.obj))));
 
 const blobToDataUrl = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
@@ -4075,12 +4085,41 @@ const CP_LOCAL_ONLY = 'secret-id';
 const connProfilePath = id => `/connprofiles/${dbxSeg(id)}.json`;
 const connProfiles = () => ctx().extensionSettings?.connectionManager?.profiles;
 
-function localConnProfiles() {
+// What travels instead: which kind of key the profile used and its label, so the other device
+// can ask for a key of its own. Neither counts as a change.
+const CP_SECRET = '_cabSecret';
+const cpHash = obj => {
+    const o = { ...obj };
+    delete o[CP_LOCAL_ONLY];
+    delete o[CP_SECRET];
+    return hash(stableJson(lean(o)));
+};
+
+/** This server's API keys by kind: { api_key_openai: [{ id, label, value (masked), active }] }. */
+async function secretState() {
+    try {
+        const res = await fetch('/api/secrets/read', { method: 'POST', headers: ctx().getRequestHeaders(), body: '{}' });
+        return res.ok ? await res.json() : null;
+    } catch { return null; }
+}
+function secretOf(state, id) {
+    for (const [key, list] of Object.entries(state || {})) {
+        const x = Array.isArray(list) ? list.find(v => v?.id === id) : null;
+        if (x) return { key, label: String(x.label ?? '') };
+    }
+    return null;
+}
+
+async function localConnProfiles() {
     const out = new Map();
-    for (const p of connProfiles() || []) {
+    const list = connProfiles() || [];
+    const state = list.some(p => p?.[CP_LOCAL_ONLY]) ? await secretState() : null;
+    for (const p of list) {
         if (!p?.id) continue;
         const obj = structuredClone(p);
         delete obj[CP_LOCAL_ONLY];
+        const secret = p[CP_LOCAL_ONLY] && secretOf(state, p[CP_LOCAL_ONLY]);
+        if (secret) obj[CP_SECRET] = secret;
         out.set(`cp:${p.id}`, { key: `cp:${p.id}`, type: 'cp', id: p.id, obj, label: `Connection profile: ${p.name || p.id}` });
     }
     return out;
@@ -4094,10 +4133,119 @@ function applyConnProfile(id, obj) {
     const i = list.findIndex(x => x?.id === id);
     const profile = { ...structuredClone(obj), id };
     delete profile[CP_LOCAL_ONLY];
+    delete profile[CP_SECRET];
     if (i >= 0 && list[i][CP_LOCAL_ONLY]) profile[CP_LOCAL_ONLY] = list[i][CP_LOCAL_ONLY];
     if (i >= 0) list[i] = profile; else list.push(profile);
     ctx().saveSettingsDebounced();
     renderConnProfileList();
+    // The other device used an API key with this profile and this one has none bound: ask for one.
+    const want = obj?.[CP_SECRET];
+    if (want?.key && !profile[CP_LOCAL_ONLY]) {
+        setCpKeyNeeded(id, { key: String(want.key), label: String(want.label ?? ''), name: String(profile.name ?? id) });
+        cpKeysAsked = true;
+    }
+}
+
+// Profiles that came with "uses an API key" but have no key on this device yet: id -> { key, label, name }.
+let cpKeysAsked = false;
+function cpKeyStoreKey() { return `cab_cp_keys:${dbxSettings().appKey || ''}`; }
+function cpKeysNeeded() {
+    let all;
+    try { all = JSON.parse(localStorage.getItem(cpKeyStoreKey()) || '{}') || {}; } catch { all = {}; }
+    // Settled meanwhile (a key was picked in Connection Manager, or the profile is gone).
+    const profiles = connProfiles() || [];
+    for (const id of Object.keys(all)) {
+        const p = profiles.find(x => x?.id === id);
+        if (!p || p[CP_LOCAL_ONLY]) delete all[id];
+    }
+    return all;
+}
+function setCpKeyNeeded(id, rec) {
+    try {
+        const all = cpKeysNeeded();
+        if (rec) all[id] = rec; else delete all[id];
+        localStorage.setItem(cpKeyStoreKey(), JSON.stringify(all));
+    } catch { /* storage unavailable: the dialog just won't come back by itself */ }
+}
+
+let secretsModule;
+async function stSecrets() {
+    if (secretsModule === undefined) {
+        try { secretsModule = await import(new URL('../../../secrets.js', import.meta.url).href); } catch { secretsModule = null; }
+    }
+    return secretsModule;
+}
+
+/** Bind an API key to a synced profile: a new key typed here, or one this server already has. */
+async function bindCpKey(id, rec, { value = '', existing = '' } = {}) {
+    let secretId = existing;
+    if (!secretId) {
+        const res = await fetch('/api/secrets/write', {
+            method: 'POST', headers: ctx().getRequestHeaders(),
+            body: JSON.stringify({ key: rec.key, value, label: rec.label || rec.name }),
+        });
+        if (!res.ok) throw new Error(`บันทึก API key ไม่สำเร็จ (${res.status})`);
+        secretId = (await res.json().catch(() => null))?.id;
+        if (!secretId) throw new Error('บันทึก API key ไม่สำเร็จ (ไม่ได้ id กลับมา)');
+    }
+    const p = (connProfiles() || []).find(x => x?.id === id);
+    if (!p) throw new Error('ไม่มี profile นี้ในเครื่องนี้แล้ว');
+    p[CP_LOCAL_ONLY] = secretId;
+    ctx().saveSettingsDebounced();
+    setCpKeyNeeded(id, null);
+    try { await (await stSecrets())?.readSecretState?.(); } catch { /* ST refreshes on its own later */ }
+    renderSyncStatus();
+}
+
+async function showCpKeyDialog() {
+    const need = Object.entries(cpKeysNeeded());
+    if (!need.length) { renderSyncStatus(); return; }
+    const state = await secretState();
+    const { wrap, close } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>ใส่ API key ให้ Connection profile</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list">
+                <p class="cab_note">profile เหล่านี้มาจากอีกเครื่อง ซึ่งใช้ API key ไว้ด้วย API key ไม่ถูกส่งข้ามเครื่อง ใส่ key สำหรับเครื่องนี้ หรือเลือก key ที่มีในเครื่องนี้อยู่แล้ว</p>
+                ${need.map(([id, r], i) => {
+                    const mine = Array.isArray(state?.[r.key]) ? state[r.key] : [];
+                    return `
+                <section class="cab_problem" data-i="${i}">
+                    <h4>${escapeHtml(r.name)}</h4>
+                    <p>ชนิด key: <code>${escapeHtml(r.key)}</code>${r.label ? ` · ชื่อ key ที่อีกเครื่อง: ${escapeHtml(r.label)}` : ''}</p>
+                    <input type="password" class="text_pole cab_cpkey_value" autocomplete="off" placeholder="วาง API key ที่นี่">
+                    ${mine.length ? `<select class="text_pole cab_cpkey_pick"><option value="">หรือใช้ key ที่มีในเครื่องนี้…</option>${mine.map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(`${x.label ?? ''} (${x.value ?? ''})`)}</option>`).join('')}</select>` : ''}
+                    <div class="cab_buttons">
+                        <div class="menu_button cab_primary" data-a="save">บันทึก</div>
+                        <div class="menu_button" data-a="skip">ข้าม (ใช้ key ปัจจุบันของเครื่องนี้)</div>
+                    </div>
+                </section>`;
+                }).join('')}
+            </div>
+        </div>`);
+    for (const sec of wrap.querySelectorAll('section[data-i]')) {
+        const [id, rec] = need[Number(sec.dataset.i)];
+        const done = () => { sec.remove(); if (!wrap.querySelector('section[data-i]')) close(); };
+        sec.addEventListener('click', async e => {
+            const a = e.target?.dataset?.a;
+            if (!a || e.target.classList.contains('disabled')) return;
+            if (a === 'skip') { setCpKeyNeeded(id, null); renderSyncStatus(); done(); return; }
+            const value = sec.querySelector('.cab_cpkey_value')?.value.trim() ?? '';
+            const existing = sec.querySelector('.cab_cpkey_pick')?.value ?? '';
+            if (!value && !existing) { toast.warn('วาง API key หรือเลือก key ที่มีอยู่ก่อน', 'Connection profile'); return; }
+            e.target.classList.add('disabled');
+            try {
+                await bindCpKey(id, rec, { value, existing: value ? '' : existing });
+                toast.ok(`ตั้ง API key ให้ "${rec.name}" แล้ว`, 'Connection profile');
+                done();
+            } catch (err) {
+                toast.err(String(err?.message ?? err), 'Connection profile');
+                e.target.classList.remove('disabled');
+            }
+        });
+    }
 }
 
 /** Connection Manager's profile drop-down, rebuilt the way it builds it. */
@@ -4400,7 +4548,7 @@ async function syncRegexOrder(entry, out) {
 async function localItemsOf(type) {
     return type === 'preset' ? localPresets() : type === 'card' ? localCards()
         : type === 'persona' ? localPersonas() : type === 'qr' ? await localQuickReplies()
-        : type === 'rx' ? localRegex() : type === 'cp' ? localConnProfiles() : await localLorebooks();
+        : type === 'rx' ? localRegex() : type === 'cp' ? await localConnProfiles() : await localLorebooks();
 }
 
 /** The text of a PNG tEXt chunk (SillyTavern keeps the card JSON, base64, under "chara"). */
@@ -4453,7 +4601,7 @@ async function downloadItem(entry) {
     }
     if (['wi', 'qr', 'rx', 'cp'].includes(entry.type)) {
         const obj = await readObj();
-        if (entry.type === 'cp') delete obj[CP_LOCAL_ONLY];
+        if (entry.type === 'cp') { delete obj[CP_LOCAL_ONLY]; return { obj, hash: cpHash(obj) }; }
         return { obj, hash: hash(stableJson(lean(obj))) };
     }
     if (entry.type === 'persona') {
@@ -4638,7 +4786,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
             ...(need.has('preset') ? localPresets() : []), ...(need.has('card') ? localCards() : []),
             ...(need.has('wi') ? await localLorebooks() : []), ...(need.has('persona') ? localPersonas() : []),
             ...(need.has('qr') ? await localQuickReplies() : []), ...(need.has('rx') ? localRegex() : []),
-            ...(need.has('cp') ? localConnProfiles() : []),
+            ...(need.has('cp') ? await localConnProfiles() : []),
         ]);
         // Quick Reply module unreachable (or waiting for a reload): leave Dropbox's sets alone.
         const qrReachable = doQr && !!(await quickReplySets());
