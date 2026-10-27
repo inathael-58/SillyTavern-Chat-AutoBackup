@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.8.5'; // keep in sync with manifest.json
+const VERSION = '2.9.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze({
     // syncAuto: write chats that are newer in Dropbox (from another device or ST server) back into this server.
     // syncSince: when sync was first used on this server — older Dropbox-only chats are offered, not created.
     // syncDeletes: once sync is in use, deleting a chat here also removes it from Dropbox and the other devices.
-    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true, syncLorebooks: true, syncPersonas: true, syncQuickReplies: true, syncRegex: true, syncBadge: true }), // indicatorStyle: 'full' | 'short' | 'off'
+    dropbox: Object.freeze({ appKey: '', refreshToken: '', pendingVerifier: '', auto: true, intervalMin: 2, indicatorStyle: 'full', syncAuto: false, syncSince: 0, syncDeletes: true, syncPresets: true, syncCards: true, syncLorebooks: true, syncPersonas: true, syncQuickReplies: true, syncRegex: true, syncConnProfiles: true, syncBadge: true }), // indicatorStyle: 'full' | 'short' | 'off'
 });
 
 const INDICATOR_CENTER = Object.freeze({ x: 0.5, y: 0.5, edge: null });
@@ -1468,6 +1468,7 @@ function renderSettings() {
                     <label class="checkbox_label" title="ชื่อ คำอธิบาย ตำแหน่ง/ความลึก lorebook ที่ผูกไว้ การผูกกับตัวละคร และรูป persona (การเปลี่ยนแค่รูปจะไปพร้อมการแก้ครั้งถัดไป)"><input type="checkbox" id="cab_sync_personas"> ซิงค์ persona ด้วย</label>
                     <label class="checkbox_label" title="ชุด Quick Reply ทั้งหมด ชุดที่อัปเดตจากอีกเครื่องจะใช้ได้หลังโหลดหน้าใหม่ (จะขึ้นแจ้งเตือนให้แตะ)"><input type="checkbox" id="cab_sync_qr"> ซิงค์ Quick Reply ด้วย</label>
                     <label class="checkbox_label" title="regex แบบ global (regex ที่ผูกกับการ์ดหรือ preset ไปพร้อมการ์ด/preset อยู่แล้ว) ใช้ได้ทันที"><input type="checkbox" id="cab_sync_regex"> ซิงค์ regex ด้วย</label>
+                    <label class="checkbox_label" title="Connection profile (API, URL, model, preset ที่ผูกไว้ ฯลฯ) ไม่ส่ง API key: profile ที่มาจากอีกเครื่องใช้ key ของเครื่องนี้"><input type="checkbox" id="cab_sync_cp"> ซิงค์ Connection profile ด้วย</label>
                     <label class="checkbox_label" title="การ์ดตัวละคร (ข้อมูลการ์ด รูป lorebook ที่ฝังในการ์ด) ชื่อไฟล์ avatar เหมือนกันทุกเครื่อง แชทจึงจับคู่กันได้ — ครั้งแรกต้องส่งการ์ดทุกใบขึ้น Dropbox อาจใช้เวลาและเน็ต"><input type="checkbox" id="cab_sync_cards"> ซิงค์การ์ดตัวละครด้วย</label>
                     <label class="checkbox_label" title="วงกลมหมุนด้านบนจอตอนเปิดแอปหรือกลับเข้าแอป ขณะตรวจเช็คและซิงค์กับ Dropbox — ขึ้น ✓ ซิงค์เรียบร้อย แล้วค่อยเปิดแชท (การซิงค์เบื้องหลังจะขึ้นเฉพาะตอนเขียนอะไรลงเครื่องนี้)"><input type="checkbox" id="cab_sync_badge"> แสดงสัญลักษณ์สถานะซิงค์ด้านบนจอ</label>
                     <small id="cab_sync_status" class="cab_note"></small>
@@ -2265,6 +2266,8 @@ function wireDbxPanel() {
     $('cab_sync_qr').addEventListener('change', e => { d.syncQuickReplies = e.target.checked; saveSettings(); });
     $('cab_sync_regex').checked = d.syncRegex !== false;
     $('cab_sync_regex').addEventListener('change', e => { d.syncRegex = e.target.checked; saveSettings(); });
+    $('cab_sync_cp').checked = d.syncConnProfiles !== false;
+    $('cab_sync_cp').addEventListener('change', e => { d.syncConnProfiles = e.target.checked; saveSettings(); });
     $('cab_sync_cards').checked = d.syncCards !== false;
     $('cab_sync_cards').addEventListener('change', e => { d.syncCards = e.target.checked; saveSettings(); });
     $('cab_sync_badge').checked = d.syncBadge !== false;
@@ -3307,9 +3310,9 @@ async function syncCheck({ visible = false } = {}) {
 }
 
 /** Something was saved on this device that the full sync uploads (preset, card, lorebook…). */
-// Item kinds the next sync has to compare again ('preset' 'card' 'wi' 'persona' 'qr' 'rx').
+// Item kinds the next sync has to compare again ('preset' 'card' 'wi' 'persona' 'qr' 'rx' 'cp').
 // All of them at first, so the first sync of a session looks at everything.
-const ITEM_KINDS = ['preset', 'card', 'wi', 'persona', 'qr', 'rx'];
+const ITEM_KINDS = ['preset', 'card', 'wi', 'persona', 'qr', 'rx', 'cp'];
 const itemsDirty = new Set(ITEM_KINDS);
 const kindOfKey = key => (key.startsWith('p:') ? 'preset' : key.slice(0, key.indexOf(':')));
 let itemsFullAt = 0;                          // last sync that compared every kind
@@ -3384,11 +3387,12 @@ async function quickRepliesChanged() {
     return Object.entries(itemBases()).some(([key, B]) => key.startsWith('qr:') && !B.deleted && !local.has(key));
 }
 
-/** Regex and personas live in settings.json, which ST saves for any setting. */
+/** Regex, personas and connection profiles live in settings.json, which ST saves for any setting. */
 function settingsSig() {
     const c = ctx();
     return {
         rx: hash(stableJson(c.extensionSettings?.regex ?? null)),
+        cp: hash(stableJson(c.extensionSettings?.connectionManager?.profiles ?? null)),
         persona: hash(stableJson({ pd: c.powerUserSettings?.persona_descriptions ?? null, pn: c.powerUserSettings?.personas ?? null })),
     };
 }
@@ -3451,7 +3455,7 @@ function watchLocalSaves() {
             else if (/\/api\/quick-replies\/(save|delete)\b/.test(url)) done.then(() => quickRepliesChanged()).then(c => { if (c) markLocalChange(['qr']); }).catch(() => {});
             else if (/\/api\/settings\/save\b/.test(url)) {
                 const now = settingsSig(), was = watch.settingsSig;
-                const kinds = ['rx', 'persona'].filter(k => now[k] !== was?.[k]);
+                const kinds = ['rx', 'persona', 'cp'].filter(k => now[k] !== was?.[k]);
                 if (kinds.length) markLocalChange(kinds);
             }
         } catch { /* never break ST's request */ }
@@ -3506,7 +3510,7 @@ function renderSyncStatus() {
     else if (sync.lastAt) parts.push(`ซิงค์ล่าสุด ${fmtTime(sync.lastAt).slice(11, 16)}`);
     else parts.push('ยังไม่ได้ซิงค์ในรอบนี้');
     if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
-    if (sync.items) parts.push(`preset/การ์ด/lorebook/persona/QR/regex: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
+    if (sync.items) parts.push(`preset/การ์ด/lorebook/persona/QR/regex/profile: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
     if (sync.invalid?.length) parts.push(`ข้ามไฟล์ใน Dropbox ที่ไม่ใช่ข้อมูลที่ใช้ได้: ${sync.invalid.slice(0, 3).join(', ')}${sync.invalid.length > 3 ? ' …' : ''}`);
     if (sync.decisions.length) parts.push(`รอเลือก ${sync.decisions.length} รายการ`);
     if (sync.missing.length) {
@@ -4065,6 +4069,57 @@ function localRegex() {
     return out;
 }
 
+// Connection profiles (Connection Manager), keyed `cp:<id>`. The secret id names an API key
+// stored on this server only, so it never travels: each side keeps its own.
+const CP_LOCAL_ONLY = 'secret-id';
+const connProfilePath = id => `/connprofiles/${dbxSeg(id)}.json`;
+const connProfiles = () => ctx().extensionSettings?.connectionManager?.profiles;
+
+function localConnProfiles() {
+    const out = new Map();
+    for (const p of connProfiles() || []) {
+        if (!p?.id) continue;
+        const obj = structuredClone(p);
+        delete obj[CP_LOCAL_ONLY];
+        out.set(`cp:${p.id}`, { key: `cp:${p.id}`, type: 'cp', id: p.id, obj, label: `Connection profile: ${p.name || p.id}` });
+    }
+    return out;
+}
+
+function applyConnProfile(id, obj) {
+    const ext = ctx().extensionSettings;
+    ext.connectionManager ??= { selectedProfile: null, profiles: [] };
+    ext.connectionManager.profiles ??= [];
+    const list = ext.connectionManager.profiles;
+    const i = list.findIndex(x => x?.id === id);
+    const profile = { ...structuredClone(obj), id };
+    delete profile[CP_LOCAL_ONLY];
+    if (i >= 0 && list[i][CP_LOCAL_ONLY]) profile[CP_LOCAL_ONLY] = list[i][CP_LOCAL_ONLY];
+    if (i >= 0) list[i] = profile; else list.push(profile);
+    ctx().saveSettingsDebounced();
+    renderConnProfileList();
+}
+
+/** Connection Manager's profile drop-down, rebuilt the way it builds it. */
+function renderConnProfileList() {
+    const select = document.getElementById('connection_profiles');
+    const cm = ctx().extensionSettings?.connectionManager;
+    if (!select || !cm) return;
+    select.innerHTML = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = '<None>';
+    none.selected = !cm.selectedProfile;
+    select.appendChild(none);
+    for (const p of [...(cm.profiles || [])].sort((a, b) => String(a.name).localeCompare(String(b.name)))) {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = p.name;
+        o.selected = p.id === cm.selectedProfile;
+        select.appendChild(o);
+    }
+}
+
 async function applyQuickReply(name, obj) {
     const res = await fetch('/api/quick-replies/save', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ ...obj, name }) });
     if (!res.ok) throw new Error(`บันทึก Quick Reply "${name}" ไม่สำเร็จ (${res.status})`);
@@ -4202,11 +4257,11 @@ async function showDeletedItems() {
 }
 
 // Items whose deletion is synced (a marker under /deleted/, like chats).
-const DELETABLE = { qr: 'quickreplies', rx: 'regex', card: 'cards', persona: 'personas' };
+const DELETABLE = { qr: 'quickreplies', rx: 'regex', card: 'cards', persona: 'personas', cp: 'connprofiles' };
 const itemIdOf = item => (item.type === 'qr' ? item.name : item.type === 'card' ? item.avatar : item.id);
 const itemTombPath = item => `/deleted/${DELETABLE[item.type]}/${dbxSeg(itemIdOf(item))}.json`;
 const itemPathOf = item => (item.type === 'qr' ? quickReplyPath(item.name) : item.type === 'card' ? cardPath(item.avatar)
-    : item.type === 'persona' ? personaPath(item.id) : regexPath(item.id));
+    : item.type === 'persona' ? personaPath(item.id) : item.type === 'cp' ? connProfilePath(item.id) : regexPath(item.id));
 
 let personasModule;
 async function stPersonas() {
@@ -4269,6 +4324,14 @@ async function deleteItemLocally(item) {
             toast.info('Quick Reply เปลี่ยนจากอีกเครื่อง — แตะที่นี่เพื่อโหลดหน้าใหม่ให้ใช้ได้', 'ซิงค์', {
                 timeOut: 0, extendedTimeOut: 0, closeButton: true, onclick: () => location.reload(),
             });
+        }
+    } else if (item.type === 'cp') {
+        const cm = ctx().extensionSettings?.connectionManager;
+        if (cm) {
+            cm.profiles = (cm.profiles || []).filter(x => x?.id !== item.id);
+            if (cm.selectedProfile === item.id) cm.selectedProfile = null;
+            ctx().saveSettingsDebounced();
+            renderConnProfileList();
         }
     } else {
         const ext = ctx().extensionSettings;
@@ -4337,7 +4400,7 @@ async function syncRegexOrder(entry, out) {
 async function localItemsOf(type) {
     return type === 'preset' ? localPresets() : type === 'card' ? localCards()
         : type === 'persona' ? localPersonas() : type === 'qr' ? await localQuickReplies()
-        : type === 'rx' ? localRegex() : await localLorebooks();
+        : type === 'rx' ? localRegex() : type === 'cp' ? localConnProfiles() : await localLorebooks();
 }
 
 /** The text of a PNG tEXt chunk (SillyTavern keeps the card JSON, base64, under "chara"). */
@@ -4388,8 +4451,9 @@ async function downloadItem(entry) {
         const obj = await readObj();
         return { obj, hash: presetHash(obj) };
     }
-    if (['wi', 'qr', 'rx'].includes(entry.type)) {
+    if (['wi', 'qr', 'rx', 'cp'].includes(entry.type)) {
         const obj = await readObj();
+        if (entry.type === 'cp') delete obj[CP_LOCAL_ONLY];
         return { obj, hash: hash(stableJson(lean(obj))) };
     }
     if (entry.type === 'persona') {
@@ -4405,8 +4469,9 @@ async function uploadItem(item, h, rev) {
     if (item.type === 'preset') {
         path = presetPath(item.apiId, item.name);
         blob = new Blob([JSON.stringify(item.obj, null, 4)], { type: 'application/octet-stream' });
-    } else if (item.type === 'wi' || item.type === 'qr' || item.type === 'rx') {
-        path = item.type === 'wi' ? lorebookPath(item.name) : item.type === 'qr' ? quickReplyPath(item.name) : regexPath(item.id);
+    } else if (['wi', 'qr', 'rx', 'cp'].includes(item.type)) {
+        path = item.type === 'wi' ? lorebookPath(item.name) : item.type === 'qr' ? quickReplyPath(item.name)
+            : item.type === 'cp' ? connProfilePath(item.id) : regexPath(item.id);
         blob = new Blob([JSON.stringify(item.obj, null, 4)], { type: 'application/octet-stream' });
     } else if (item.type === 'persona') {
         path = personaPath(item.id);
@@ -4481,6 +4546,7 @@ async function applyItem(entry, content, local) {
     else if (entry.type === 'persona') await applyPersona(entry.id, content.obj, local);
     else if (entry.type === 'qr') await applyQuickReply(entry.name, content.obj);
     else if (entry.type === 'rx') applyRegex(entry.id, content.obj);
+    else if (entry.type === 'cp') applyConnProfile(entry.id, content.obj);
     else await applyCard(entry.avatar, content.blob, local?.ch);
 }
 
@@ -4508,7 +4574,8 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
     const doPresets = d.syncPresets !== false, doCards = d.syncCards !== false;
     const doWorlds = d.syncLorebooks !== false, doPersonas = d.syncPersonas !== false;
     const doQr = d.syncQuickReplies !== false && !qrReloadNeeded, doRegex = d.syncRegex !== false;
-    if (!doPresets && !doCards && !doWorlds && !doPersonas && !doQr && !doRegex) return;
+    const doCp = d.syncConnProfiles !== false;
+    if (!doPresets && !doCards && !doWorlds && !doPersonas && !doQr && !doRegex && !doCp) return;
     const remote = new Map();
     const tombs = new Map(); // deletion markers (Quick Reply, regex)
     let regexOrder = null;
@@ -4529,6 +4596,9 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         } else if (doQr && parts[0] === 'quickreplies' && parts.length === 2 && /\.json$/i.test(parts[1])) {
             const name = dbxUnseg(parts[1].replace(/\.json$/i, ''));
             remote.set(`qr:${name}`, { ...e, type: 'qr', name, label: `Quick Reply: ${name}` });
+        } else if (doCp && parts[0] === 'connprofiles' && parts.length === 2 && /\.json$/i.test(parts[1])) {
+            const id = dbxUnseg(parts[1].replace(/\.json$/i, ''));
+            remote.set(`cp:${id}`, { ...e, type: 'cp', id, label: `Connection profile: ${id}` });
         } else if (doRegex && parts[0] === 'regex' && parts.length === 2 && /\.json$/i.test(parts[1])) {
             const id = dbxUnseg(parts[1].replace(/\.json$/i, ''));
             remote.set(`rx:${id}`, { ...e, type: 'rx', id, label: `Regex: ${id}` });
@@ -4538,13 +4608,14 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
             if (doRegex && parts[1] === 'regex') tombs.set(`rx:${v}`, { ...e, type: 'rx', id: v, label: `Regex: ${v}` });
             if (doCards && parts[1] === 'cards') tombs.set(`card:${v}`, { ...e, type: 'card', avatar: v, label: `การ์ด: ${v.replace(/\.png$/i, '')}` });
             if (doPersonas && parts[1] === 'personas') tombs.set(`persona:${v}`, { ...e, type: 'persona', id: v, label: `Persona: ${v}` });
+            if (doCp && parts[1] === 'connprofiles') tombs.set(`cp:${v}`, { ...e, type: 'cp', id: v, label: `Connection profile: ${v}` });
         } else if (doRegex && parts.length === 1 && parts[0] === 'regexorder.json') {
             regexOrder = e;
         }
     }
     // Only kinds that changed: saved here (itemsDirty), or moved in Dropbox since this browser
     // last matched it. Reading every lorebook, card and preset is the heavy part of a sync.
-    const enabled = { preset: doPresets, card: doCards, wi: doWorlds, persona: doPersonas, qr: doQr, rx: doRegex };
+    const enabled = { preset: doPresets, card: doCards, wi: doWorlds, persona: doPersonas, qr: doQr, rx: doRegex, cp: doCp };
     const bases = itemBases();
     const moved = new Set();
     for (const [key, R] of remote) { const B = bases[key]; if (!B || B.deleted || B.rev !== R.rev) moved.add(kindOfKey(key)); }
@@ -4567,6 +4638,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
             ...(need.has('preset') ? localPresets() : []), ...(need.has('card') ? localCards() : []),
             ...(need.has('wi') ? await localLorebooks() : []), ...(need.has('persona') ? localPersonas() : []),
             ...(need.has('qr') ? await localQuickReplies() : []), ...(need.has('rx') ? localRegex() : []),
+            ...(need.has('cp') ? localConnProfiles() : []),
         ]);
         // Quick Reply module unreachable (or waiting for a reload): leave Dropbox's sets alone.
         const qrReachable = doQr && !!(await quickReplySets());
@@ -4575,6 +4647,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         const deletesOn = d.syncDeletes !== false;
         // An empty character / persona list means "not loaded yet", never "all deleted".
         const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex)
+            : type === 'cp' ? Array.isArray(connProfiles())
             : type === 'card' ? (ctx().characters?.length ?? 0) > 0
             : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
         // What is new or moved on either side first: telling a matched item apart from one edited
@@ -4592,7 +4665,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
             const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
             if (L && deleted.has(key)) { forgetDeletedHere(key); deleted.delete(key); } // made again here
             const label = (L || R || T).label;
-            syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
+            syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex/profile ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
             try {
                 if (!R && T) {
                     // Deleted on another device.
@@ -4656,6 +4729,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 }
                 if (R.type === 'persona' && content.obj?.name) R.label = `Persona: ${content.obj.name}`;
                 if (R.type === 'rx' && content.obj?.scriptName) R.label = `Regex: ${content.obj.scriptName}`;
+                if (R.type === 'cp' && content.obj?.name) R.label = `Connection profile: ${content.obj.name}`;
                 const lh = L ? await itemHash(L) : null;
                 if (lh === content.hash) { setItemBase(key, { rev: R.rev, hash: lh }); continue; }
                 if (!L || (B && lh === B.hash)) {
