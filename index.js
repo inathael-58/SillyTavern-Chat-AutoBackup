@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.8.3'; // keep in sync with manifest.json
+const VERSION = '2.8.4'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -3065,6 +3065,31 @@ async function listChatFiles(only) {
 }
 
 /**
+ * Cards in Dropbox whose chats are in Dropbox too but whose character isn't on this server:
+ * the sync brings these first, so their chats can follow in the same run.
+ */
+function cardsWanted(files) {
+    const cards = new Map(); // lowercase path -> avatar as Dropbox has it
+    for (const f of files) {
+        const parts = String(f.path_display || '').split('/').filter(Boolean);
+        if (parts[0] === 'cards' && parts.length === 2) cards.set(String(f.path_lower || '').toLowerCase(), dbxUnseg(parts[1]));
+    }
+    const want = new Set();
+    // An empty character list means "not loaded yet": every card would look wanted.
+    if (!ctx().characters?.length) return want;
+    const here = new Set(ctx().characters.map(ch => String(ch?.avatar ?? '').toLowerCase()));
+    for (const f of files) {
+        const parts = String(f.path_display || '').split('/').filter(Boolean);
+        if (parts[0] !== 'character' || parts.length !== 3) continue;
+        const avatar = dbxUnseg(parts[1]);
+        if (here.has(avatar.toLowerCase())) continue;
+        const remote = cards.get(cardPath(avatar).toLowerCase());
+        if (remote) want.add(`card:${remote}`);
+    }
+    return want;
+}
+
+/**
  * Bring this server up to date with Dropbox: write what is safe, collect what needs a choice.
  * auto: skip (don't wait) if Dropbox is busy.
  */
@@ -3081,7 +3106,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         setBadge('check', '', { quiet });
         try {
             const files = await listChatFiles(only);
-            if (!only) await syncItems(files, out, { auto });
+            if (!only) await syncItems(files, out, { auto, want: cardsWanted(files) });
             // /character|group/<entity>/<chat>.jsonl, or a deletion marker /deleted/…/<chat>.json
             const parse = f => {
                 const parts = String(f.path_display || '').split('/').filter(Boolean);
@@ -3398,6 +3423,11 @@ function watchLocalSaves() {
     const on = (ev, fn) => { if (E?.[ev]) eventSource.on(E[ev], fn); };
     for (const ev of ['PRESET_DELETED', 'PRESET_RENAMED']) on(ev, () => markLocalChange(['preset']));
     for (const ev of ['CHARACTER_RENAMED', 'CHARACTER_DUPLICATED']) on(ev, () => markLocalChange(['card']));
+    // The old file name is gone on purpose: its card in Dropbox must not come back here.
+    on('CHARACTER_RENAMED', oldAvatar => {
+        const B = oldAvatar && itemBase(`card:${oldAvatar}`);
+        if (B && !B.deleted) setItemBase(`card:${oldAvatar}`, { ...B, renamed: true });
+    });
     on('CHARACTER_EDITED', data => checkCardEdit(data?.detail?.character?.avatar));
     on('WORLDINFO_UPDATED', () => markLocalChange(['wi']));
     for (const ev of ['PERSONA_CREATED', 'PERSONA_UPDATED', 'PERSONA_RENAMED']) on(ev, () => markLocalChange(['persona']));
@@ -4441,21 +4471,24 @@ async function applyItem(entry, content, local) {
 
 /** After cards changed: reload ST's character list and remember what this side now has. */
 async function refreshCardsAfter(applied) {
-    if (!applied.length) return;
+    if (!applied.length) return [];
     try { await ctx().getCharacters?.(); } catch (e) { console.warn(LOG, e); }
     const now = localCards();
+    const notListed = [];
     for (const { key, rev } of applied) {
         const item = now.get(key);
         // ST may tidy a card on import; take its own reading as the matched state.
         if (item) { try { setItemBase(key, { rev, hash: await localCardHash(item) }); } catch { /* next round */ } }
+        else { setItemBase(key, null); notListed.push(key); } // not "matched": the next sync tries again
     }
+    return notListed;
 }
 
 /**
  * Sync presets and cards with Dropbox (run inside the Dropbox lock, before chats so that
  * new characters exist when their chats arrive). auto: stop after ~15 s, continue next round.
  */
-async function syncItems(entries, out, { auto = false } = {}) {
+async function syncItems(entries, out, { auto = false, want = new Set() } = {}) {
     const d = dbxSettings();
     const doPresets = d.syncPresets !== false, doCards = d.syncCards !== false;
     const doWorlds = d.syncLorebooks !== false, doPersonas = d.syncPersonas !== false;
@@ -4509,6 +4542,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
     if (!auto || Date.now() - itemsFullAt > ITEMS_FULL_EVERY_MS) for (const k of ITEM_KINDS) itemsDirty.add(k);
     const dirty = new Set(itemsDirty);
     itemsDirty.clear();
+    if (want.size) moved.add('card'); // their chats are waiting
     const need = new Set(ITEM_KINDS.filter(k => enabled[k] && (dirty.has(k) || moved.has(k))));
     let finished = false;
     try {
@@ -4533,7 +4567,7 @@ async function syncItems(entries, out, { auto = false } = {}) {
         // cards would spend its 15 s on those and never reach a card just added.
         const settled = k => { const B = bases[k]; return !!(B && !B.deleted && local.has(k) && remote.get(k)?.rev === B.rev); };
         const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])].filter(k => need.has(kindOfKey(k)))
-            .sort((a, b) => settled(a) - settled(b));
+            .sort((a, b) => (want.has(b) - want.has(a)) || (settled(a) - settled(b)));
         const deleted = deletedHere();
         const deadline = auto ? Date.now() + 15_000 : Infinity;
         const cardsApplied = [];
@@ -4576,7 +4610,10 @@ async function syncItems(entries, out, { auto = false } = {}) {
                     out.itemsSent++;
                     continue;
                 }
-                if (B && B.rev === R.rev) {
+                // Matched once, now missing here, yet nobody deleted or renamed it here and its chats
+                // wait in Dropbox (e.g. an import that didn't stick): bring it in again.
+                const comeBack = !L && want.has(key) && B && !B.deleted && !B.renamed && !deleted.has(key);
+                if (B && B.rev === R.rev && !comeBack) {
                     if (!L) {
                         // Deleted here since the last match (cards and personas: only when the user deleted it here).
                         const explicitOnly = R.type === 'card' || R.type === 'persona';
@@ -4618,7 +4655,8 @@ async function syncItems(entries, out, { auto = false } = {}) {
                 if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
             }
         }
-        await refreshCardsAfter(cardsApplied);
+        const notListed = await refreshCardsAfter(cardsApplied);
+        if (notListed.length) out.errors.push(`นำเข้าการ์ดแล้วแต่ไม่ขึ้นในรายการตัวละคร: ${notListed.map(x => x.replace(/^card:/, '')).join(', ')}`);
         if (need.has('rx') && Date.now() < deadline) {
             try { await syncRegexOrder(regexOrder, out); } catch (e) { out.errors.push(`ลำดับ regex: ${e?.message ?? e}`); }
         }
