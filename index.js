@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.8.2'; // keep in sync with manifest.json
+const VERSION = '2.8.3'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1474,6 +1474,7 @@ function renderSettings() {
                     <div class="cab_buttons">
                         <div id="cab_sync_now" class="menu_button" title="เทียบทุกแชทบน Dropbox กับเซิร์ฟเวอร์นี้ แล้วอัปเดตแชทที่อีกเครื่องคุยต่อ">ซิงค์ตอนนี้</div>
                         <div id="cab_sync_decide" class="menu_button" hidden>เลือกฉบับ</div>
+                        <div id="cab_sync_orphans" class="menu_button" hidden title="แชทใน Dropbox ของตัวละครที่ไม่มีทั้งในเครื่องนี้และใน Dropbox (เช่น ลบตัวละครไปแล้ว) Dropbox เก็บไฟล์ที่ลบไว้ให้กู้ได้ประมาณ 30 วัน">ลบแชทที่ข้ามออกจาก Dropbox</div>
                         <div id="cab_sync_undelete" class="menu_button" title="การ์ดและ persona ที่ถูกลบผ่านการซิงค์ เลือกแล้วกู้กลับมาได้ทุกเครื่อง (Dropbox เก็บไฟล์ที่ลบไว้ประมาณ 30 วัน)">กู้การ์ด/persona ที่ถูกลบ</div>
                     </div>
                 </div>
@@ -2252,6 +2253,7 @@ function wireDbxPanel() {
         if (r?.busy) toast.info('กำลังส่งขึ้น Dropbox อยู่ ลองอีกครั้งในอีกสักครู่', 'ซิงค์');
     }));
     $('cab_sync_decide').addEventListener('click', () => showSyncDecisions());
+    $('cab_sync_orphans').addEventListener('click', run($('cab_sync_orphans'), () => removeOrphanChats()));
     $('cab_sync_undelete').addEventListener('click', () => { showDeletedItems().catch(e => toast.err(String(e?.message ?? e), 'ซิงค์')); });
     $('cab_sync_presets').checked = d.syncPresets !== false;
     $('cab_sync_presets').addEventListener('change', e => { d.syncPresets = e.target.checked; saveSettings(); });
@@ -3072,7 +3074,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
     if (!d.syncSince) { d.syncSince = Date.now(); saveSettings(); }
     if (cloud.running && !auto) setBadge('pending', 'รอส่งขึ้น Dropbox ให้เสร็จก่อน…', { quiet });
     return await withCloudLock(async () => {
-        const out = { applied: [], decisions: [], missing: new Map(), noCard: new Set(), errors: [], itemsApplied: [], itemsSent: 0 };
+        const out = { applied: [], decisions: [], missing: new Map(), noCard: new Set(), orphans: [], errors: [], itemsApplied: [], itemsSent: 0 };
         sync.error = '';
         cloud.held.clear(); // what Dropbox holds may have changed: the next upload looks again
         if (!only) watch.localDirty = false;
@@ -3101,7 +3103,10 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
                 if (tomb && inDropbox.has(t.key)) continue; // the chat came back since: it wins
                 if (!tomb && t.missing) {
                     out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1);
-                    if (t.type === 'character' && !cardsThere.has(cardPath(t.avatar).toLowerCase())) out.noCard.add(t.label);
+                    if (t.type === 'character' && !cardsThere.has(cardPath(t.avatar).toLowerCase())) {
+                        out.noCard.add(t.label);
+                        out.orphans.push({ t, path: files[i].path_lower });
+                    }
                     continue;
                 }
                 // Background runs don't download again what already waits for the user's choice.
@@ -3135,7 +3140,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
             ...sync.decisions.filter(x => looked ? !looked.has(x.t.key) : false),
             ...out.decisions,
         ];
-        if (!only) { sync.missing = [...out.missing.entries()]; sync.noCard = [...out.noCard]; }
+        if (!only) { sync.missing = [...out.missing.entries()]; sync.noCard = [...out.noCard]; sync.orphans = out.orphans; }
         sync.applied += out.applied.length;
         if (out.itemsApplied.length || out.itemsSent) {
             sync.items = { got: (sync.items?.got || 0) + out.itemsApplied.length, sent: (sync.items?.sent || 0) + out.itemsSent };
@@ -3175,6 +3180,28 @@ function syncReport(r, { quiet = false } = {}) {
     }
     if (!quiet && !r.applied.length && !r.itemsApplied?.length && !sync.decisions.length && !r.errors.length) toast.ok('ตรงกับ Dropbox แล้ว', 'ซิงค์');
     if (r.errors.length && !quiet) toast.err(r.errors.slice(0, 3).join('<br>'), 'ซิงค์');
+}
+
+/**
+ * Chats in Dropbox whose character is neither here nor in Dropbox (usually deleted along with
+ * the character, which deletes no chat file in Dropbox): remove them, leaving the usual
+ * markers so other devices that still have them ask or follow.
+ */
+async function removeOrphanChats() {
+    const list = sync.orphans || [];
+    if (!list.length) return;
+    const lines = list.slice(0, 15).map(({ t }) => `• ${t.label} — ${t.chatId}`).join('\n');
+    if (!confirm(`ลบ ${list.length} แชทนี้ออกจาก Dropbox?\n${lines}${list.length > 15 ? '\n…' : ''}\n\nเครื่องอื่นที่ยังมีตัวละครและแชทนี้จะลบตามตอนซิงค์ (ถ้าที่นั่นแก้แชทไว้ จะถามก่อน) Dropbox เก็บไฟล์ที่ลบไว้ให้กู้ได้ประมาณ 30 วัน`)) return;
+    const failed = [];
+    const r = await withCloudLock(async () => {
+        for (const { t, path } of list) {
+            try { await syncDeleteEverywhere(t, { path }); } catch (e) { console.warn(LOG, 'orphan', t.key, e); failed.push(`${t.label}: ${e?.message ?? e}`); }
+        }
+    });
+    if (r?.busy) { toast.info('กำลังส่งขึ้น Dropbox อยู่ ลองอีกครั้งในอีกสักครู่', 'ซิงค์'); return; }
+    if (failed.length) toast.err(failed.slice(0, 3).join('<br>'), 'ซิงค์');
+    else toast.ok(`ลบ ${list.length} แชทออกจาก Dropbox แล้ว`, 'ซิงค์');
+    await syncNow();
 }
 
 /** Manual sync from the panel or a dialog. */
@@ -3430,6 +3457,12 @@ function watchLocalSaves() {
 
 function renderSyncStatus() {
     if (badge.phase === 'decide') { if (sync.decisions.length) renderSyncBadge(); else setBadge('done'); }
+    const orphanBtn = document.getElementById('cab_sync_orphans');
+    if (orphanBtn) {
+        const n = sync.orphans?.length || 0;
+        orphanBtn.hidden = !n;
+        orphanBtn.textContent = `ลบแชทที่ข้ามออกจาก Dropbox (${n})`;
+    }
     const el = document.getElementById('cab_sync_status');
     const btn = document.getElementById('cab_sync_decide');
     if (btn) {
