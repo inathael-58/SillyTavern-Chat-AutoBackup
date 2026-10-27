@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.8.4'; // keep in sync with manifest.json
+const VERSION = '2.8.5'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -3099,7 +3099,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
     if (!d.syncSince) { d.syncSince = Date.now(); saveSettings(); }
     if (cloud.running && !auto) setBadge('pending', 'รอส่งขึ้น Dropbox ให้เสร็จก่อน…', { quiet });
     return await withCloudLock(async () => {
-        const out = { applied: [], decisions: [], missing: new Map(), noCard: new Set(), orphans: [], errors: [], itemsApplied: [], itemsSent: 0 };
+        const out = { applied: [], decisions: [], missing: new Map(), noCard: new Set(), orphans: [], errors: [], itemsApplied: [], itemsInvalid: [], itemsSent: 0 };
         sync.error = '';
         cloud.held.clear(); // what Dropbox holds may have changed: the next upload looks again
         if (!only) watch.localDirty = false;
@@ -3167,6 +3167,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         ];
         if (!only) { sync.missing = [...out.missing.entries()]; sync.noCard = [...out.noCard]; sync.orphans = out.orphans; }
         sync.applied += out.applied.length;
+        if (out.itemsInvalid.length) sync.invalid = [...new Set([...(sync.invalid || []), ...out.itemsInvalid])];
         if (out.itemsApplied.length || out.itemsSent) {
             sync.items = { got: (sync.items?.got || 0) + out.itemsApplied.length, sent: (sync.items?.sent || 0) + out.itemsSent };
         }
@@ -3506,6 +3507,7 @@ function renderSyncStatus() {
     else parts.push('ยังไม่ได้ซิงค์ในรอบนี้');
     if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
     if (sync.items) parts.push(`preset/การ์ด/lorebook/persona/QR/regex: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
+    if (sync.invalid?.length) parts.push(`ข้ามไฟล์ใน Dropbox ที่ไม่ใช่ข้อมูลที่ใช้ได้: ${sync.invalid.slice(0, 3).join(', ')}${sync.invalid.length > 3 ? ' …' : ''}`);
     if (sync.decisions.length) parts.push(`รอเลือก ${sync.decisions.length} รายการ`);
     if (sync.missing.length) {
         const n = sync.missing.reduce((a, [, k]) => a + k, 0);
@@ -3864,7 +3866,7 @@ function localPresets() {
         for (const [name, idx] of pairs) {
             let obj = presets[idx];
             if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch { continue; } }
-            if (!name || !obj || typeof obj !== 'object') continue;
+            if (!name || !isPlainObject(obj)) continue; // e.g. a regex pack imported as a preset (an array)
             out.set(`p:${apiId}:${name}`, { key: `p:${apiId}:${name}`, type: 'preset', apiId, name, obj, label: `${PRESET_LABEL[apiId]}: ${name}` });
         }
     }
@@ -4368,17 +4370,30 @@ async function cardFromPng(blob) {
     return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Thrown for a file in Dropbox that isn't what its folder says (e.g. an array saved as a preset). */
+function notAnItem(entry) {
+    return Object.assign(new Error(`ไฟล์ใน Dropbox ไม่ใช่ข้อมูลที่ใช้ได้: ${entry.label ?? entry.path_display}`), { invalid: true });
+}
+
 async function downloadItem(entry) {
+    const readObj = async () => {
+        let obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch { /* checked below */ } }
+        if (!isPlainObject(obj)) throw notAnItem(entry);
+        return obj;
+    };
     if (entry.type === 'preset') {
-        const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        const obj = await readObj();
         return { obj, hash: presetHash(obj) };
     }
     if (['wi', 'qr', 'rx'].includes(entry.type)) {
-        const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        const obj = await readObj();
         return { obj, hash: hash(stableJson(lean(obj))) };
     }
     if (entry.type === 'persona') {
-        const obj = JSON.parse(await dbxDownloadText(`rev:${entry.rev}`));
+        const obj = await readObj();
         return { obj, hash: personaHash(obj) };
     }
     const blob = await dbxDownloadBlob(`rev:${entry.rev}`);
@@ -4630,7 +4645,15 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 }
                 const waiting = sync.decisions.find(x => x.kind === 'item' && x.t.key === key && x.rev === R.rev);
                 if (waiting && auto) { out.decisions.push(waiting); continue; }
-                const content = await downloadItem(R);
+                let content;
+                try { content = await downloadItem(R); } catch (e) {
+                    if (!e?.invalid) throw e;
+                    // Not retried until Dropbox has another revision; a valid copy here is sent over it.
+                    setItemBase(key, { rev: R.rev, hash: 'invalid' });
+                    out.itemsInvalid.push(label);
+                    if (L) { await uploadItem(L, await itemHash(L), R.rev); out.itemsSent++; }
+                    continue;
+                }
                 if (R.type === 'persona' && content.obj?.name) R.label = `Persona: ${content.obj.name}`;
                 if (R.type === 'rx' && content.obj?.scriptName) R.label = `Regex: ${content.obj.scriptName}`;
                 const lh = L ? await itemHash(L) : null;
