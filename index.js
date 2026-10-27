@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.8.1'; // keep in sync with manifest.json
+const VERSION = '2.8.2'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -3072,7 +3072,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
     if (!d.syncSince) { d.syncSince = Date.now(); saveSettings(); }
     if (cloud.running && !auto) setBadge('pending', 'รอส่งขึ้น Dropbox ให้เสร็จก่อน…', { quiet });
     return await withCloudLock(async () => {
-        const out = { applied: [], decisions: [], missing: new Map(), errors: [], itemsApplied: [], itemsSent: 0 };
+        const out = { applied: [], decisions: [], missing: new Map(), noCard: new Set(), errors: [], itemsApplied: [], itemsSent: 0 };
         sync.error = '';
         cloud.held.clear(); // what Dropbox holds may have changed: the next upload looks again
         if (!only) watch.localDirty = false;
@@ -3090,13 +3090,20 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
                 return { tomb, t: syncTargetOf(parts[0], dbxUnseg(parts[1]), dbxUnseg(parts[2].replace(/\.jsonl?$/i, ''))) };
             };
             const parsed = files.map(parse);
+            // Cards Dropbox holds: a chat skipped for want of its character either waits for its
+            // card to arrive, or for the other device to send the card at all.
+            const cardsThere = new Set(files.map(f => String(f.path_lower || '')).filter(p => p.startsWith('/cards/')));
             const inDropbox = new Set(parsed.filter(p => p && !p.tomb).map(p => p.t.key));
             for (let i = 0; i < files.length; i++) {
                 syncProgress(`กำลังตรวจ ${i + 1}/${files.length}…`, `แชท ${i + 1}/${files.length}`);
                 if (!parsed[i]) continue;
                 const { tomb, t } = parsed[i];
                 if (tomb && inDropbox.has(t.key)) continue; // the chat came back since: it wins
-                if (!tomb && t.missing) { out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1); continue; }
+                if (!tomb && t.missing) {
+                    out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1);
+                    if (t.type === 'character' && !cardsThere.has(cardPath(t.avatar).toLowerCase())) out.noCard.add(t.label);
+                    continue;
+                }
                 // Background runs don't download again what already waits for the user's choice.
                 const waiting = auto && sync.decisions.find(x => x.t.key === t.key && x.rev === files[i].rev);
                 if (waiting) { out.decisions.push({ ...waiting, t }); continue; }
@@ -3128,7 +3135,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
             ...sync.decisions.filter(x => looked ? !looked.has(x.t.key) : false),
             ...out.decisions,
         ];
-        if (!only) sync.missing = [...out.missing.entries()];
+        if (!only) { sync.missing = [...out.missing.entries()]; sync.noCard = [...out.noCard]; }
         sync.applied += out.applied.length;
         if (out.itemsApplied.length || out.itemsSent) {
             sync.items = { got: (sync.items?.got || 0) + out.itemsApplied.length, sent: (sync.items?.sent || 0) + out.itemsSent };
@@ -3440,6 +3447,12 @@ function renderSyncStatus() {
     if (sync.missing.length) {
         const n = sync.missing.reduce((a, [, k]) => a + k, 0);
         parts.push(`ข้าม ${n} แชทเพราะไม่มีตัวละคร/กลุ่มนี้ในเครื่องนี้ (${sync.missing.slice(0, 5).map(([l]) => l).join(', ')}${sync.missing.length > 5 ? ' …' : ''})`);
+        const noCard = sync.noCard || [];
+        if (noCard.length) {
+            parts.push(`การ์ดของ ${noCard.slice(0, 5).join(', ')}${noCard.length > 5 ? ' …' : ''} ยังไม่มีใน Dropbox — เปิด ST เครื่องที่มีการ์ดแล้วกด ซิงค์ตอนนี้ ที่นั่น`);
+        } else if (dbxSettings().syncCards !== false) {
+            parts.push('การ์ดอยู่ใน Dropbox แล้ว จะตามมาในรอบถัดไป');
+        }
     }
     if (sync.error) parts.push(`⚠ ${sync.error}`);
     el.textContent = parts.join(' · ');
@@ -4482,7 +4495,12 @@ async function syncItems(entries, out, { auto = false } = {}) {
         const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex)
             : type === 'card' ? (ctx().characters?.length ?? 0) > 0
             : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
-        const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])].filter(k => need.has(kindOfKey(k)));
+        // What is new or moved on either side first: telling a matched item apart from one edited
+        // here means reading it (a request per card on a lazy-loading server), and a run with many
+        // cards would spend its 15 s on those and never reach a card just added.
+        const settled = k => { const B = bases[k]; return !!(B && !B.deleted && local.has(k) && remote.get(k)?.rev === B.rev); };
+        const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])].filter(k => need.has(kindOfKey(k)))
+            .sort((a, b) => settled(a) - settled(b));
         const deleted = deletedHere();
         const deadline = auto ? Date.now() + 15_000 : Infinity;
         const cardsApplied = [];
