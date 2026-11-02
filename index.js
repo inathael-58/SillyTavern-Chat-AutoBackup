@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.9.2'; // keep in sync with manifest.json
+const VERSION = '2.9.3'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1478,7 +1478,7 @@ function renderSettings() {
                         <div id="cab_sync_cpdupes" class="menu_button" hidden title="Connection profile ชื่อเดียวกันแต่ตั้งค่าต่างกัน เลือกว่าจะเก็บอันไหน">Connection profile ชื่อซ้ำ</div>
                         <div id="cab_sync_cpkeys" class="menu_button" hidden title="Connection profile ที่มาจากอีกเครื่องและยังไม่มี API key ในเครื่องนี้">ใส่ API key ให้ profile</div>
                         <div id="cab_sync_orphans" class="menu_button" hidden title="แชทใน Dropbox ของตัวละครที่ไม่มีทั้งในเครื่องนี้และใน Dropbox (เช่น ลบตัวละครไปแล้ว) Dropbox เก็บไฟล์ที่ลบไว้ให้กู้ได้ประมาณ 30 วัน">ลบแชทที่ข้ามออกจาก Dropbox</div>
-                        <div id="cab_sync_undelete" class="menu_button" title="การ์ดและ persona ที่ถูกลบผ่านการซิงค์ เลือกแล้วกู้กลับมาได้ทุกเครื่อง (Dropbox เก็บไฟล์ที่ลบไว้ประมาณ 30 วัน)">กู้การ์ด/persona ที่ถูกลบ</div>
+                        <div id="cab_sync_undelete" class="menu_button" title="การ์ด persona และ lorebook ที่ถูกลบผ่านการซิงค์ เลือกแล้วกู้กลับมาได้ทุกเครื่อง (Dropbox เก็บไฟล์ที่ลบไว้ประมาณ 30 วัน)">กู้การ์ด/persona/lorebook ที่ถูกลบ</div>
                     </div>
                 </div>
                 <div id="cab_pocky" hidden>
@@ -3477,6 +3477,19 @@ function watchLocalSaves() {
     // `done` resolves to whether the request succeeded.
     const noteRequest = (url, body, done) => {
         try {
+            // A lorebook deleted by the user (ST's editor, rename, Bulk Manager): remember it so the sync
+            // passes the deletion on instead of bringing the file back from Dropbox. Recorded even while
+            // a sync runs; the sync's own deletions are told apart by name.
+            if (/\/api\/worldinfo\/delete\b/.test(url)) {
+                let name = null;
+                try { name = typeof body === 'string' ? JSON.parse(body)?.name : null; } catch { /* unreadable body */ }
+                done.then(ok => {
+                    if (!ok) return;
+                    if (name && !selfWiDeletes.has(name)) noteDeletedHere(`wi:${name}`);
+                    markDeletion('wi');
+                }).catch(() => {});
+                return;
+            }
             // A sync writing into ST holds the lock; its own saves need no second look.
             if (cloud.lockHeld || !/\/api\//.test(url)) return;
             const kind = SAVES.find(([re]) => re.test(url))?.[1];
@@ -4421,9 +4434,10 @@ function applyRegex(id, obj) {
     ctx().saveSettingsDebounced();
 }
 
-// Cards and personas the user deleted on this device (ST's own delete events), waiting for the
-// sync to pass the deletion on. Only these leave a marker: a card that is merely missing here
-// (renamed — ST renames the PNG with the character — or named in another letter case) must not.
+// Cards, personas and lorebooks the user deleted on this device (ST's own delete events and
+// requests), waiting for the sync to pass the deletion on. Only these leave a marker: a card that
+// is merely missing here (renamed — ST renames the PNG with the character — or named in another
+// letter case, or a lorebook list not loaded yet) must not.
 function deletedHereKey() { return `cab_deleted_here:${dbxSettings().appKey || ''}`; }
 function deletedHere() {
     try { return new Set(JSON.parse(localStorage.getItem(deletedHereKey()) || '[]')); } catch { return new Set(); }
@@ -4432,7 +4446,7 @@ function setDeletedHere(set) {
     try { localStorage.setItem(deletedHereKey(), JSON.stringify([...set])); } catch { /* storage unavailable: the deletion just isn't passed on */ }
 }
 function noteDeletedHere(key) {
-    if (/^(card|persona):./.test(key)) { const set = deletedHere(); set.add(key); setDeletedHere(set); }
+    if (/^(card|persona|wi):./.test(key)) { const set = deletedHere(); set.add(key); setDeletedHere(set); }
 }
 function forgetDeletedHere(key) {
     const set = deletedHere();
@@ -4451,10 +4465,10 @@ async function tombIsExplicit(T) {
     return !!tombNotes.get(T.rev)?.explicit;
 }
 
-/** Cards and personas that have a deletion marker in Dropbox: { type, id, key, tomb, label, when }. */
+/** Cards, personas and lorebooks that have a deletion marker in Dropbox: { type, id, key, tomb, label, when }. */
 async function listDeletedItems() {
     const out = [];
-    for (const [folder, type] of [['/deleted/cards', 'card'], ['/deleted/personas', 'persona']]) {
+    for (const [folder, type] of [['/deleted/cards', 'card'], ['/deleted/personas', 'persona'], ['/deleted/worlds', 'wi']]) {
         let page;
         try { page = await dbxRpc('files/list_folder', { path: folder, limit: 2000 }); } catch (e) {
             if (/not_found/.test(String(e?.message))) continue;
@@ -4467,7 +4481,7 @@ async function listDeletedItems() {
                 const known = type === 'persona' ? ctx().powerUserSettings?.personas?.[id] : null;
                 out.push({
                     type, id, key: `${type}:${id}`, tomb: e.path_display || `${folder}/${e.name}`,
-                    label: type === 'card' ? `การ์ด: ${id.replace(/\.png$/i, '')}` : `Persona: ${known || id}`,
+                    label: type === 'card' ? `การ์ด: ${id.replace(/\.png$/i, '')}` : type === 'wi' ? `Lorebook: ${id}` : `Persona: ${known || id}`,
                     when: Date.parse(e.server_modified) || 0,
                 });
             }
@@ -4478,9 +4492,9 @@ async function listDeletedItems() {
     return out.sort((a, b) => b.when - a.when);
 }
 
-/** Bring a deleted card or persona back in Dropbox and drop its marker; the sync then puts it back on every device. */
+/** Bring a deleted card, persona or lorebook back in Dropbox and drop its marker; the sync then puts it back on every device. */
 async function restoreDeletedItem(x) {
-    const path = x.type === 'card' ? cardPath(x.id) : personaPath(x.id);
+    const path = x.type === 'card' ? cardPath(x.id) : x.type === 'wi' ? lorebookPath(x.id) : personaPath(x.id);
     let revs;
     try { revs = await dbxRpc('files/list_revisions', { path, mode: 'path', limit: 10 }); } catch (e) {
         throw new Error(`${x.label}: หาไฟล์เดิมใน Dropbox ไม่เจอ (${e?.message ?? e})`);
@@ -4496,11 +4510,11 @@ async function restoreDeletedItem(x) {
 async function showDeletedItems() {
     if (!dbxConnected()) throw new Error('ยังไม่ได้เชื่อมต่อ Dropbox');
     const items = await listDeletedItems();
-    if (!items.length) { toast.info('ไม่มีการ์ดหรือ persona ที่ถูกลบผ่านการซิงค์', 'ซิงค์'); return; }
+    if (!items.length) { toast.info('ไม่มีการ์ด persona หรือ lorebook ที่ถูกลบผ่านการซิงค์', 'ซิงค์'); return; }
     const { wrap, close } = openModal(`
         <div class="cab_dialog cab_explain">
             <div class="cab_head">
-                <b>การ์ด / persona ที่ถูกลบผ่านการซิงค์</b>
+                <b>การ์ด / persona / lorebook ที่ถูกลบผ่านการซิงค์</b>
                 <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
             </div>
             <div class="cab_list">
@@ -4538,10 +4552,10 @@ async function showDeletedItems() {
 }
 
 // Items whose deletion is synced (a marker under /deleted/, like chats).
-const DELETABLE = { qr: 'quickreplies', rx: 'regex', card: 'cards', persona: 'personas', cp: 'connprofiles' };
-const itemIdOf = item => (item.type === 'qr' ? item.name : item.type === 'card' ? item.avatar : item.id);
+const DELETABLE = { qr: 'quickreplies', rx: 'regex', card: 'cards', persona: 'personas', cp: 'connprofiles', wi: 'worlds' };
+const itemIdOf = item => (item.type === 'qr' || item.type === 'wi' ? item.name : item.type === 'card' ? item.avatar : item.id);
 const itemTombPath = item => `/deleted/${DELETABLE[item.type]}/${dbxSeg(itemIdOf(item))}.json`;
-const itemPathOf = item => (item.type === 'qr' ? quickReplyPath(item.name) : item.type === 'card' ? cardPath(item.avatar)
+const itemPathOf = item => (item.type === 'qr' ? quickReplyPath(item.name) : item.type === 'wi' ? lorebookPath(item.name) : item.type === 'card' ? cardPath(item.avatar)
     : item.type === 'persona' ? personaPath(item.id) : item.type === 'cp' ? connProfilePath(item.id) : regexPath(item.id));
 
 let personasModule;
@@ -4568,8 +4582,44 @@ async function inUseHere(item) {
     return false;
 }
 
-/** Delete a Quick Reply set, regex script, card or persona here because another device deleted it. */
+let worldInfoModule;
+async function stWorldInfo() {
+    if (worldInfoModule === undefined) {
+        try { worldInfoModule = await import(new URL('../../../world-info.js', import.meta.url).href); } catch (e) {
+            console.warn(LOG, 'world-info module not reachable', e);
+            worldInfoModule = null;
+        }
+    }
+    return worldInfoModule;
+}
+
+// Lorebooks the sync itself is deleting: the request hook must not take them for the user's own deletion.
+const selfWiDeletes = new Set();
+
+/** Delete a lorebook through ST (unselects it, refreshes the list and the editor). */
+async function deleteLorebookLocally(name) {
+    const c = ctx();
+    selfWiDeletes.add(name);
+    try {
+        const wi = await stWorldInfo();
+        if (typeof wi?.deleteWorldInfo === 'function') {
+            const ok = await wi.deleteWorldInfo(name);
+            if (!ok && (c.getWorldInfoNames?.() || []).includes(name)) throw new Error(`ลบ lorebook "${name}" ไม่สำเร็จ`);
+        } else {
+            const res = await fetch('/api/worldinfo/delete', { method: 'POST', headers: c.getRequestHeaders(), body: JSON.stringify({ name }) });
+            if (!res.ok) throw new Error(`ลบ lorebook "${name}" ไม่สำเร็จ (${res.status})`);
+            try { await c.updateWorldInfoList?.(); } catch (e) { console.warn(LOG, e); }
+        }
+    } finally {
+        forgetDeletedHere(`wi:${name}`);
+        // The request hook notes the deletion a few microtasks after the response: keep the name until then.
+        setTimeout(() => selfWiDeletes.delete(name), 1000);
+    }
+}
+
+/** Delete a Quick Reply set, regex script, lorebook, card or persona here because another device deleted it. */
 async function deleteItemLocally(item) {
+    if (item.type === 'wi') { await deleteLorebookLocally(item.name); return; }
     if (item.type === 'card' || item.type === 'persona') {
         if (await inUseHere(item)) {
             throw new Error(item.type === 'card' ? 'กำลังเปิดแชทของการ์ดนี้อยู่ — ปิดแชทหรือเปลี่ยนไปตัวอื่นก่อน' : 'กำลังใช้ persona นี้อยู่ — สลับไปตัวอื่นก่อน');
@@ -4858,7 +4908,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
     const doCp = d.syncConnProfiles !== false;
     if (!doPresets && !doCards && !doWorlds && !doPersonas && !doQr && !doRegex && !doCp) return;
     const remote = new Map();
-    const tombs = new Map(); // deletion markers (Quick Reply, regex)
+    const tombs = new Map(); // deletion markers (Quick Reply, regex, lorebook, card, persona, profile)
     let regexOrder = null;
     for (const e of entries) {
         const parts = String(e.path_display || '').split('/').filter(Boolean);
@@ -4890,6 +4940,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
             if (doCards && parts[1] === 'cards') tombs.set(`card:${v}`, { ...e, type: 'card', avatar: v, label: `การ์ด: ${v.replace(/\.png$/i, '')}` });
             if (doPersonas && parts[1] === 'personas') tombs.set(`persona:${v}`, { ...e, type: 'persona', id: v, label: `Persona: ${v}` });
             if (doCp && parts[1] === 'connprofiles') tombs.set(`cp:${v}`, { ...e, type: 'cp', id: v, label: `Connection profile: ${v}` });
+            if (doWorlds && parts[1] === 'worlds') tombs.set(`wi:${v}`, { ...e, type: 'wi', name: v, label: `Lorebook: ${v}` });
         } else if (doRegex && parts.length === 1 && parts[0] === 'regexorder.json') {
             regexOrder = e;
         }
@@ -4929,6 +4980,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         // An empty character / persona list means "not loaded yet", never "all deleted".
         const listedHere = type => (type === 'qr' ? qrReachable : type === 'rx' ? Array.isArray(ctx().extensionSettings?.regex)
             : type === 'cp' ? Array.isArray(connProfiles())
+            : type === 'wi' ? typeof ctx().getWorldInfoNames === 'function'
             : type === 'card' ? (ctx().characters?.length ?? 0) > 0
             : type === 'persona' ? Object.keys(ctx().powerUserSettings?.personas || {}).length > 0 : false);
         // What is new or moved on either side first: telling a matched item apart from one edited
@@ -4950,7 +5002,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
             try {
                 if (!R && T) {
                     // Deleted on another device.
-                    if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); continue; }
+                    if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); forgetDeletedHere(key); deleted.delete(key); continue; }
                     if ((L.type === 'card' || L.type === 'persona') && !(await tombIsExplicit(T))) {
                         // A 2.7.0 marker: maybe just a rename elsewhere. Keep it and send it back up.
                         await keepDeletedItem(L);
@@ -4982,10 +5034,22 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 // Matched once, now missing here, yet nobody deleted or renamed it here and its chats
                 // wait in Dropbox (e.g. an import that didn't stick): bring it in again.
                 const comeBack = !L && want.has(key) && B && !B.deleted && !B.renamed && !deleted.has(key);
+                // A lorebook the user deleted here goes, even if Dropbox got a newer copy from a device that
+                // hadn't heard of the deletion yet (that copy stays restorable in Dropbox for ~30 days).
+                if (!L && R.type === 'wi' && deleted.has(key)) {
+                    if (deletesOn) {
+                        await deleteItemEverywhere({ ...R, key });
+                        out.itemsSent++;
+                    }
+                    forgetDeletedHere(key);
+                    deleted.delete(key);
+                    if (!deletesOn) setItemBase(key, { rev: R.rev, hash: B?.hash ?? null }); // don't bring it back either
+                    continue;
+                }
                 if (B && B.rev === R.rev && !comeBack) {
                     if (!L) {
-                        // Deleted here since the last match (cards and personas: only when the user deleted it here).
-                        const explicitOnly = R.type === 'card' || R.type === 'persona';
+                        // Deleted here since the last match (cards, personas and lorebooks: only when the user deleted it here).
+                        const explicitOnly = R.type === 'card' || R.type === 'persona' || R.type === 'wi';
                         if (DELETABLE[R.type] && deletesOn && listedHere(R.type) && (!explicitOnly || deleted.has(key))) {
                             await deleteItemEverywhere({ ...R, key });
                             forgetDeletedHere(key);
