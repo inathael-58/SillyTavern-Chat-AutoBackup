@@ -296,3 +296,12 @@
     #cab_syncbadge { animation: none; }
     #cab_syncbadge .cab_spin { animation-duration: 2.4s; }
 }
+
+/* Deleting backups */
+.cab_settings .cab_danger, #cab_modal .cab_danger { border-color: #d05050; color: #e06060; }
+.cab_settings .cab_danger.disabled, #cab_modal .cab_danger.disabled { opacity: 0.45; pointer-events: none; }
+#cab_modal .cab_foot .cab_danger { display: inline-flex; gap: 6px; align-items: center; width: auto; margin: 6px 0 0; padding: 4px 10px; font-size: 1.15em; }
+#cab_modal .cab_foot:has(.cab_danger) { opacity: 1; }
+#cab_modal .cab_pick { max-height: 45vh; overflow-y: auto; margin: 6px 0 8px; }
+#cab_modal .cab_pick .checkbox_label { align-items: flex-start; gap: 8px; padding: 4px 0; }
+#cab_modal .cab_problem .text_pole { width: 100%; margin: 4px 0; }

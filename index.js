@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.9.4'; // keep in sync with manifest.json
+const VERSION = '2.10.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -255,6 +255,13 @@ async function dbDelete(ids) {
         tx.objectStore(PAYLOAD).delete(id);
         tx.objectStore(SIGS).delete(id);
     }
+    await txDone(tx);
+}
+
+async function dbClearAll() {
+    const d = await db();
+    const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
+    for (const name of [META, PAYLOAD, SIGS]) tx.objectStore(name).clear();
     await txDone(tx);
 }
 
@@ -985,7 +992,202 @@ async function renderBrowser() {
         const est = await navigator.storage?.estimate?.();
         if (est?.quota) quota = ` · พื้นที่เบราว์เซอร์ใช้ ${fmtBytes(est.usage)} / ${fmtBytes(est.quota)}`;
     } catch { /* ignore */ }
-    wrap.querySelector('#cab_foot').textContent = `${all.length} snapshots · ${chats.size} แชท · ${fmtBytes(total)}${quota}`;
+    const foot = wrap.querySelector('#cab_foot');
+    foot.textContent = `${all.length} snapshots · ${chats.size} แชท · ${fmtBytes(total)}${quota}`;
+    if (browserKey && rows.length) {
+        const chat = chats.get(browserKey);
+        const btn = document.createElement('div');
+        btn.className = 'menu_button cab_danger';
+        btn.title = 'ลบทุก snapshot ของแชทนี้ออกจากเบราว์เซอร์นี้ (ไม่แตะแชทบนเซิร์ฟเวอร์และไฟล์บน Dropbox)';
+        btn.innerHTML = '<i class="fa-solid fa-trash"></i> ลบ backup ของแชทนี้';
+        btn.addEventListener('click', async () => {
+            const size = fmtBytes(rows.reduce((a, m) => a + (m.size || 0), 0));
+            const open = currentChatInfo()?.key === browserKey;
+            if (!confirm(`ลบ backup ทั้งหมดของ "${chat?.label ?? ''} — ${chat?.chatId ?? ''}" (${rows.length} snapshots, ${size})?\n\n`
+                + 'ลบเฉพาะ backup ในเบราว์เซอร์นี้ ตัวแชทบนเซิร์ฟเวอร์และไฟล์บน Dropbox ไม่ถูกแตะ และกู้ backup ที่ลบแล้วคืนไม่ได้'
+                + (open ? '\n\nแชทนี้เปิดอยู่ จะเริ่ม backup ใหม่ภายในไม่กี่นาที' : ''))) return;
+            try {
+                const n = await deleteBackupsOf([browserKey]);
+                toast.ok(`ลบ ${n} snapshots แล้ว`);
+            } catch (e) { console.error(LOG, e); toast.err(String(e.message ?? e)); }
+            await renderBrowser();
+        });
+        foot.append(document.createElement('br'), btn);
+    }
+}
+
+// ---------------------------------------------------------------- freeing space
+
+/** Delete every snapshot of these chats. Server chats and Dropbox files are left alone. */
+async function deleteBackupsOf(keys) {
+    await flush();
+    const keySet = new Set(keys);
+    const ids = (await dbAllMeta()).filter(m => keySet.has(m.key)).map(m => m.id);
+    await dbDelete(ids);
+    // Forget the last saved hash, so a chat that still exists gets a fresh backup on the next check.
+    for (const k of keySet) lastHashByKey.delete(k);
+    afterLocalDelete();
+    return ids.length;
+}
+
+function afterLocalDelete() {
+    cloud.unsent = null; // the newest snapshot of a chat may have changed: look at every chat again
+    updateIndicator();
+    renderStorageInfo();
+}
+
+/** Backups whose chat is no longer on this server (chat deleted, or its character/group deleted). */
+async function findOrphanBackups() {
+    await flush();
+    const c = ctx();
+    const all = await dbAllMeta();
+    if (!all.length) return [];
+    if (all.some(m => m.type !== 'group') && !(c.characters || []).length) throw new Error('รายชื่อตัวละครยังโหลดไม่เสร็จ ลองใหม่อีกครั้งในอีกสักครู่');
+    const onServer = await serverChatList();
+    const lower = new Set([...onServer.keys()].map(k => k.toLowerCase()));
+    const byKey = new Map();
+    for (const m of all) {
+        const g = byKey.get(m.key) ?? byKey.set(m.key, {
+            key: m.key, type: m.type, label: m.label, chatId: m.chatId,
+            entity: m.key.slice(2, m.key.length - String(m.chatId).length - 1), // key = c:<avatar>:<chat> or g:<group>:<chat>
+            n: 0, size: 0,
+        }).get(m.key);
+        g.n++;
+        g.size += m.size || 0;
+    }
+    const out = [];
+    for (const g of byKey.values()) {
+        if (onServer.has(g.key) || lower.has(g.key.toLowerCase())) continue;
+        // Not in the list: ask for that one chat before calling it gone.
+        const t = syncTargetOf(g.type, g.entity, g.chatId);
+        if (!t.missing) {
+            if (onServer.has(t.key)) continue;
+            const msgs = await serverChat(t); // throws on a server error, so nothing is called gone by mistake
+            if (msgs.length) continue;
+        }
+        g.why = t.missing ? (g.type === 'group' ? 'ไม่มีกลุ่มนี้แล้ว' : 'ไม่มีตัวละครนี้แล้ว') : 'แชทถูกลบแล้ว';
+        out.push(g);
+    }
+    return out;
+}
+
+async function openOrphanCleanup() {
+    const { wrap, close } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>ลบ backup ของแชทที่ไม่มีแล้ว</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list"><div class="cab_empty">กำลังเทียบกับแชทบนเซิร์ฟเวอร์…</div></div>
+        </div>`);
+    const list = wrap.querySelector('.cab_list');
+    let found;
+    try { found = await findOrphanBackups(); } catch (e) {
+        console.error(LOG, e);
+        list.innerHTML = `<div class="cab_empty">ตรวจไม่สำเร็จ: ${escapeHtml(String(e.message ?? e))}</div>`;
+        return;
+    }
+    if (!wrap.isConnected) return;
+    if (!found.length) {
+        list.innerHTML = '<div class="cab_empty">ไม่มี backup ค้าง ทุก backup ยังมีแชทอยู่บนเซิร์ฟเวอร์</div>';
+        return;
+    }
+    const size = fmtBytes(found.reduce((a, g) => a + g.size, 0));
+    const snaps = found.reduce((a, g) => a + g.n, 0);
+    list.innerHTML = `
+        <section class="cab_problem">
+            <p>พบ backup ของ <b>${found.length} แชท</b> ที่ไม่มีอยู่บนเซิร์ฟเวอร์แล้ว (${snaps} snapshots, ${size}) ติ๊กออกได้ถ้าอยากเก็บไว้กู้คืนภายหลัง</p>
+            <div class="cab_pick">${found.map((g, i) => `
+                <label class="checkbox_label"><input type="checkbox" data-i="${i}" checked>
+                    <span><b>${escapeHtml(g.label)}</b> — ${escapeHtml(g.chatId)}<br><small>${g.why} · ${g.n} snapshots · ${fmtBytes(g.size)}</small></span>
+                </label>`).join('')}
+            </div>
+            <p><small>ลบเฉพาะ backup ในเบราว์เซอร์นี้ ไฟล์บน Dropbox ไม่ถูกแตะ และกู้ backup ที่ลบแล้วคืนไม่ได้ ถ้าไม่แน่ใจกด Export เก็บไว้ก่อน</small></p>
+            <div class="cab_buttons">
+                <div class="menu_button cab_danger" data-go><i class="fa-solid fa-trash"></i> ลบที่เลือก</div>
+                <div class="menu_button" data-export><i class="fa-solid fa-file-export"></i> Export ก่อน</div>
+            </div>
+        </section>`;
+    wrap.querySelector('[data-export]').addEventListener('click', () => exportAll().catch(e => toast.err(String(e.message ?? e))));
+    const go = wrap.querySelector('[data-go]');
+    go.addEventListener('click', async () => {
+        const keys = [...wrap.querySelectorAll('.cab_pick input:checked')].map(x => found[x.dataset.i].key);
+        if (!keys.length) return toast.info('ยังไม่ได้เลือกแชท');
+        go.classList.add('disabled');
+        try {
+            const n = await deleteBackupsOf(keys);
+            toast.ok(`ลบ backup ของ ${keys.length} แชทแล้ว (${n} snapshots)`);
+            close();
+        } catch (e) {
+            console.error(LOG, e);
+            toast.err(String(e.message ?? e));
+            go.classList.remove('disabled');
+        }
+    });
+}
+
+const WIPE_WORD = 'ลบทั้งหมด';
+
+async function openWipeAll() {
+    await flush();
+    const all = await dbAllMeta();
+    if (!all.length) return toast.info('ยังไม่มี backup ในเบราว์เซอร์นี้');
+    const chats = new Set(all.map(m => m.key)).size;
+    const size = fmtBytes(all.reduce((a, m) => a + (m.size || 0), 0));
+    const { wrap, close } = openModal(`
+        <div class="cab_dialog cab_explain">
+            <div class="cab_head">
+                <b>ลบ backup ทั้งหมดในเครื่องนี้</b>
+                <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
+            </div>
+            <div class="cab_list">
+                <section class="cab_problem">
+                    <p>จะลบ <b>${all.length} snapshots ของ ${chats} แชท (${size})</b> ออกจากเบราว์เซอร์นี้ และ<b>กู้คืนไม่ได้</b></p>
+                    <p><b>ไม่ถูกแตะ:</b> แชทบนเซิร์ฟเวอร์ ไฟล์บน Dropbox และการตั้งค่าของ extension ส่วน backup อัตโนมัติยังทำงานต่อ แชทที่เปิดอยู่จะเริ่ม backup ใหม่ภายในไม่กี่นาที</p>
+                    <p>แนะนำให้กด <b>Export</b> เก็บไฟล์ไว้ก่อน ถ้าภายหลังอยากได้คืนก็ Import กลับมาได้</p>
+                    <div class="cab_buttons"><div class="menu_button cab_primary" data-export><i class="fa-solid fa-file-export"></i> Export ก่อน</div></div>
+                    <p>พิมพ์ <b>${WIPE_WORD}</b> เพื่อยืนยัน</p>
+                    <input class="text_pole" data-word autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${WIPE_WORD}">
+                    <div class="cab_buttons"><div class="menu_button cab_danger disabled" data-go><i class="fa-solid fa-trash"></i> ลบ backup ทั้งหมด</div></div>
+                </section>
+            </div>
+        </div>`);
+    wrap.querySelector('[data-export]').addEventListener('click', () => exportAll().catch(e => toast.err(String(e.message ?? e))));
+    const word = wrap.querySelector('[data-word]');
+    const go = wrap.querySelector('[data-go]');
+    word.addEventListener('input', () => go.classList.toggle('disabled', word.value.trim() !== WIPE_WORD));
+    go.addEventListener('click', async () => {
+        if (word.value.trim() !== WIPE_WORD) return;
+        go.classList.add('disabled');
+        try {
+            await flush();
+            await dbClearAll();
+            lastHashByKey.clear();
+            afterLocalDelete();
+            toast.ok('ลบ backup ทั้งหมดในเบราว์เซอร์นี้แล้ว');
+            close();
+        } catch (e) {
+            console.error(LOG, e);
+            toast.err(String(e.message ?? e));
+            go.classList.remove('disabled');
+        }
+    });
+}
+
+/** Snapshot count and size in the settings panel. */
+async function renderStorageInfo() {
+    const el = document.getElementById('cab_storage');
+    if (!el) return;
+    try {
+        const all = await dbAllMeta();
+        const chats = new Set(all.map(m => m.key)).size;
+        let text = all.length
+            ? `ตอนนี้มี ${all.length} snapshots ของ ${chats} แชท · ${fmtBytes(all.reduce((a, m) => a + (m.size || 0), 0))}`
+            : 'ยังไม่มี backup ในเบราว์เซอร์นี้';
+        const est = await navigator.storage?.estimate?.().catch(() => null);
+        if (est?.quota) text += ` · พื้นที่เบราว์เซอร์ใช้ ${fmtBytes(est.usage)} / ${fmtBytes(est.quota)}`;
+        el.textContent = text;
+    } catch (e) { console.warn(LOG, e); }
 }
 
 // ---------------------------------------------------------------- floating status indicator
@@ -1409,6 +1611,16 @@ function renderSettings() {
                     <b>ไม่เก็บ:</b> preset, การ์ดตัวละคร, lorebook, persona, Quick Reply, regex และ Connection profile ส่วนนี้ต้องเชื่อม Dropbox<br>
                     <b>เก็บที่ไหน:</b> ในเบราว์เซอร์นี้เท่านั้น (IndexedDB) เครื่องหรือเบราว์เซอร์อื่นมี backup แยกกัน ล้างข้อมูลเว็บไซต์หรือลบ Web App ออกจากหน้าจอโฮมแล้ว backup จะหายด้วย ควรกด Export เก็บไฟล์ไว้เป็นระยะ</small>
                 </div>
+                <details id="cab_space" class="cab_setup">
+                    <summary>พื้นที่ที่ใช้ และลบ backup</summary>
+                    <small id="cab_storage" class="cab_note"></small>
+                    <div class="cab_buttons">
+                        <div id="cab_orphans" class="menu_button" title="หา backup ของแชทที่ถูกลบออกจาก ST แล้ว (รวมแชทของตัวละครหรือกลุ่มที่ลบไปแล้ว) เลือกได้ว่าจะลบอันไหน"><i class="fa-solid fa-broom"></i> ลบ backup ของแชทที่ไม่มีแล้ว</div>
+                        <div id="cab_wipe" class="menu_button cab_danger" title="ลบทุก snapshot ในเบราว์เซอร์นี้ (ไม่แตะแชทบนเซิร์ฟเวอร์และไฟล์บน Dropbox)"><i class="fa-solid fa-trash"></i> ลบ backup ทั้งหมดในเครื่องนี้</div>
+                    </div>
+                    <small class="cab_note">ลบ backup ของแชทเดียว: กด <b>ดู/กู้คืน</b> เลือกแชทจากรายการด้านบน แล้วกด <b>ลบ backup ของแชทนี้</b> ด้านล่าง<br>
+                    การลบมีผลกับ backup ในเบราว์เซอร์นี้เท่านั้น ไม่แตะแชทบนเซิร์ฟเวอร์และไฟล์บน Dropbox ตัวเลขพื้นที่เบราว์เซอร์อาจลดลงช้ากว่า เพราะเบราว์เซอร์คืนพื้นที่ทีหลัง</small>
+                </details>
                 <label class="checkbox_label"><input type="checkbox" id="cab_enabled"> เปิด backup อัตโนมัติ</label>
                 <div class="cab_grid">
                     <label for="cab_debounce">รอหลังแชทเปลี่ยน (วินาที)</label>
@@ -1564,6 +1776,9 @@ function renderSettings() {
     });
 
     $('cab_now').addEventListener('click', backupNow);
+    $('cab_orphans').addEventListener('click', () => openOrphanCleanup().catch(e => toast.err(String(e.message ?? e))));
+    $('cab_wipe').addEventListener('click', () => openWipeAll().catch(e => toast.err(String(e.message ?? e))));
+    $('cab_space').addEventListener('toggle', e => { if (e.target.open) renderStorageInfo(); });
     $('cab_open').addEventListener('click', () => openBrowser());
     $('cab_export').addEventListener('click', () => exportAll().catch(e => toast.err(String(e.message ?? e))));
     $('cab_import').addEventListener('click', () => $('cab_import_file').click());
