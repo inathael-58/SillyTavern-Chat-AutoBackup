@@ -12,6 +12,28 @@
 .cab_settings .cab_buttons .menu_button { width: auto; padding: 4px 10px; }
 .cab_settings .cab_note { display: block; opacity: 0.7; margin-top: 6px; }
 
+/* Two clearly separate parts: local backup (works alone) and Dropbox (optional) */
+.cab_settings .cab_section_head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 6px; }
+.cab_settings .cab_pill {
+    font-size: 0.8em;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--SmartThemeQuoteColor, #e18a24);
+    color: var(--SmartThemeQuoteColor, #e18a24);
+}
+.cab_settings .cab_box {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.4));
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 4px 0 8px;
+}
+.cab_settings .cab_box .cab_buttons { margin-bottom: 2px; }
+.cab_settings .cab_primary { border-color: var(--SmartThemeQuoteColor, #e18a24); font-weight: 700; }
+.cab_settings .cab_list_plain { margin: 4px 0 0; padding-left: 1.2em; }
+.cab_settings .cab_list_plain li { margin: 2px 0; }
+.cab_settings .cab_setup { margin: 6px 0; }
+.cab_settings .cab_setup > summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+
 /* Sized to the visible viewport from JS (top/left/width/height); the values
  * below are the fallback. The dialog is centred with margin:auto, which —
  * unlike align-items:center — never pushes the header past the top edge. */

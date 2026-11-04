@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.9.3'; // keep in sync with manifest.json
+const VERSION = '2.9.4'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1395,6 +1395,20 @@ function renderSettings() {
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
+                <div class="cab_section_head"><i class="fa-solid fa-hard-drive"></i> <b>สำรองแชทในเครื่องนี้</b> <span class="cab_pill">ใช้ได้เลย ไม่ต้องเชื่อม Dropbox</span></div>
+                <div class="cab_box">
+                    <b>แชทหายหรือไม่ครบ?</b> กด <b>ดู/กู้คืน</b> เลือก snapshot ที่มีข้อความครบ แล้วกด <b>กู้คืน</b> จะได้เป็นไฟล์แชทใหม่ ไฟล์เดิมไม่ถูกเขียนทับ
+                    <div class="cab_buttons">
+                        <div id="cab_open" class="menu_button cab_primary"><i class="fa-solid fa-clock-rotate-left"></i> ดู/กู้คืน</div>
+                        <div id="cab_now" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Backup ตอนนี้</div>
+                        <div id="cab_export" class="menu_button" title="ส่งออก backup ทั้งหมดเป็นไฟล์เดียว"><i class="fa-solid fa-file-export"></i> Export</div>
+                        <div id="cab_import" class="menu_button"><i class="fa-solid fa-file-import"></i> Import</div>
+                        <input type="file" id="cab_import_file" accept=".json,application/json" hidden>
+                    </div>
+                    <small class="cab_note"><b>เก็บอะไร:</b> เฉพาะแชท (ทุกข้อความ ทุก swipe รวมความจำของ Memory Hub ตัวแปรในแชท และ author's note) ของแชทเดี่ยวและแชทกลุ่ม<br>
+                    <b>ไม่เก็บ:</b> preset, การ์ดตัวละคร, lorebook, persona, Quick Reply, regex และ Connection profile ส่วนนี้ต้องเชื่อม Dropbox<br>
+                    <b>เก็บที่ไหน:</b> ในเบราว์เซอร์นี้เท่านั้น (IndexedDB) เครื่องหรือเบราว์เซอร์อื่นมี backup แยกกัน ล้างข้อมูลเว็บไซต์หรือลบ Web App ออกจากหน้าจอโฮมแล้ว backup จะหายด้วย ควรกด Export เก็บไฟล์ไว้เป็นระยะ</small>
+                </div>
                 <label class="checkbox_label"><input type="checkbox" id="cab_enabled"> เปิด backup อัตโนมัติ</label>
                 <div class="cab_grid">
                     <label for="cab_debounce">รอหลังแชทเปลี่ยน (วินาที)</label>
@@ -1418,18 +1432,21 @@ function renderSettings() {
                     <div id="cab_indicator_reset" class="menu_button" title="ย้ายปุ่มสถานะกลับมากลางจอ (ใช้เมื่อปุ่มหลุดไปอยู่ที่หาไม่เจอ)"><i class="fa-solid fa-crosshairs"></i> รีเซ็ตตำแหน่งปุ่ม</div>
                 </div>
                 <small class="cab_note">ลากปุ่มสถานะไปวางตรงไหนก็ได้ ปล่อยแล้วจะดูดติดขอบจอที่ใกล้ที่สุด</small>
-                <div class="cab_buttons">
-                    <div id="cab_now" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Backup ตอนนี้</div>
-                    <div id="cab_open" class="menu_button"><i class="fa-solid fa-clock-rotate-left"></i> ดู/กู้คืน</div>
-                    <div id="cab_export" class="menu_button" title="ส่งออก backup ทั้งหมดเป็นไฟล์เดียว"><i class="fa-solid fa-file-export"></i> Export</div>
-                    <div id="cab_import" class="menu_button"><i class="fa-solid fa-file-import"></i> Import</div>
-                    <input type="file" id="cab_import_file" accept=".json,application/json" hidden>
-                </div>
-                <small class="cab_note">เก็บในเบราว์เซอร์นี้เท่านั้น (IndexedDB) — เครื่อง/เบราว์เซอร์อื่นมี backup แยกกัน ควรกด Export เก็บไว้เป็นระยะ</small>
                 <hr class="sysHR">
-                <b>สำรองขึ้น Dropbox</b>
+                <div class="cab_section_head"><i class="fa-brands fa-dropbox"></i> <b>Dropbox</b> <span class="cab_pill">ไม่บังคับ</span></div>
                 <small id="cab_dbx_status" class="cab_note"></small>
-                <div id="cab_dbx_setup">
+                <div class="cab_box">
+                    <b>เชื่อม Dropbox แล้วได้เพิ่ม:</b>
+                    <ul class="cab_list_plain">
+                        <li><b>สำเนาแชทนอกเครื่อง</b> ถ้าเครื่องหาย ล้างข้อมูลเว็บไซต์ หรือลบ Web App ก็ยังดึงกลับมาได้</li>
+                        <li><b>ซิงค์แชทระหว่างเครื่อง</b> เช่น ST บนโฮส ↔ TauriTavern คุยต่อที่ไหนก็ได้</li>
+                        <li><b>ซิงค์ preset, การ์ดตัวละคร, lorebook, persona, Quick Reply, regex และ Connection profile</b></li>
+                        <li><b>กู้การ์ด, persona, lorebook หรือ preset ที่ถูกลบ</b> (ภายในประมาณ 30 วัน)</li>
+                    </ul>
+                    <small id="cab_dbx_skip" class="cab_note">ถ้าแค่จะกู้แชทที่หาย ไม่ต้องเชื่อม ข้ามส่วนนี้ได้เลย</small>
+                </div>
+                <details id="cab_dbx_setup" class="cab_setup">
+                    <summary>เชื่อมต่อ Dropbox (ตั้งค่าครั้งเดียว)</summary>
                     <small class="cab_note">ตั้งค่าครั้งเดียว: สร้าง app ที่ <a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noopener">dropbox.com/developers/apps</a> (เลือก Scoped access · App folder) → แท็บ Permissions ติ๊ก <code>files.content.write</code> และ <code>files.content.read</code> แล้วกด Submit → คัดลอก App key จากแท็บ Settings มาวางด้านล่าง</small>
                     <input id="cab_dbx_key" class="text_pole" placeholder="App key" autocomplete="off" autocapitalize="off" spellcheck="false">
                     <div class="cab_buttons"><div id="cab_dbx_connect" class="menu_button">เชื่อมต่อ</div></div>
@@ -1438,7 +1455,7 @@ function renderSettings() {
                         <input id="cab_dbx_code" class="text_pole" placeholder="รหัสจาก Dropbox" autocomplete="off" autocapitalize="off" spellcheck="false">
                         <div class="cab_buttons"><div id="cab_dbx_confirm" class="menu_button">ยืนยันรหัส</div></div>
                     </div>
-                </div>
+                </details>
                 <div id="cab_dbx_on" hidden>
                     <label class="checkbox_label" title="ส่ง snapshot ล่าสุดของแชทที่เปลี่ยน ขึ้น Dropbox ทีละแชท ทับไฟล์เดิมของแชทนั้น"><input type="checkbox" id="cab_dbx_auto"> ส่งขึ้น Dropbox อัตโนมัติ</label>
                     <div class="cab_grid">
@@ -2154,6 +2171,10 @@ function renderDbxPanel() {
     onBox.hidden = !on;
     // Keep the code box visible after a reload, so a code copied from Dropbox can still be pasted.
     document.getElementById('cab_dbx_step2').hidden = on || !pendingVerifier();
+    // Waiting for the code: keep the setup open so the code box is in view.
+    if (!on && pendingVerifier()) setup.open = true;
+    const skip = document.getElementById('cab_dbx_skip');
+    if (skip) skip.hidden = on;
     const link = document.getElementById('cab_dbx_link');
     link.hidden = !link.getAttribute('href');
     renderDbxStatus();
