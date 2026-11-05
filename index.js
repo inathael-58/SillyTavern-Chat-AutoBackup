@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.10.0'; // keep in sync with manifest.json
+const VERSION = '2.10.1'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -146,10 +146,50 @@ async function unpack(rec) {
 // ---------------------------------------------------------------- IndexedDB
 
 let dbPromise = null;
+let dbConn = null;
+
+function resetDb() {
+    const d = dbConn;
+    dbPromise = null;
+    dbConn = null;
+    try { d?.close(); } catch { /* already gone */ }
+}
+
+/**
+ * A connection the browser dropped under us. iOS/iPadOS Safari loses it after the app was in
+ * the background ("Connection to Indexed Database server lost. Refresh the page to try again.")
+ * and every later transaction on it fails until a new connection is opened.
+ */
+function isDeadDbError(e) {
+    if (!e || e.name === 'QuotaExceededError') return false;
+    return e.name === 'InvalidStateError' || e.name === 'UnknownError'
+        || /connection|server lost|closing|closed|database/i.test(String(e.message ?? ''));
+}
+
+/** Run `fn(db)`; if the connection turned out to be dead, reopen it and try once more. */
+async function withDb(fn) {
+    try {
+        return await fn(await db());
+    } catch (e) {
+        if (!isDeadDbError(e)) throw e;
+        console.warn(LOG, 'IndexedDB connection lost — reopening', e);
+        resetDb();
+        return await fn(await db());
+    }
+}
+
+const DB_OPEN_TIMEOUT_MS = 10000;
 
 function db() {
     if (dbPromise) return dbPromise;
     dbPromise = new Promise((resolve, reject) => {
+        let timedOut = false;
+        // A broken IndexedDB on iOS can leave open() hanging with no answer at all.
+        const timer = setTimeout(() => {
+            timedOut = true;
+            dbPromise = null;
+            reject(new Error('เปิดฐานข้อมูลในเครื่อง (IndexedDB) ไม่ตอบสนอง'));
+        }, DB_OPEN_TIMEOUT_MS);
         const req = indexedDB.open(DB_NAME, DB_VERSION);
         req.onupgradeneeded = () => {
             const d = req.result;
@@ -167,12 +207,17 @@ function db() {
         };
         req.onblocked = () => toast.warn('มีแท็บ SillyTavern อื่นที่ยังใช้ extension เวอร์ชันเก่าอยู่ — ปิดหรือรีเฟรชแท็บนั้นก่อน');
         req.onsuccess = () => {
+            clearTimeout(timer);
             const d = req.result;
+            if (timedOut) { d.close(); return; }
             // Let a newer version in another tab upgrade the database.
-            d.onversionchange = () => { d.close(); dbPromise = null; };
+            d.onversionchange = () => { d.close(); if (dbConn === d) resetDb(); };
+            // The browser closed it for us (iOS Safari does this after the app sits in the background).
+            d.onclose = () => { if (dbConn === d) resetDb(); };
+            dbConn = d;
             resolve(d);
         };
-        req.onerror = () => { dbPromise = null; reject(req.error); };
+        req.onerror = () => { clearTimeout(timer); if (!timedOut) dbPromise = null; reject(req.error); };
     });
     return dbPromise;
 }
@@ -186,83 +231,93 @@ function txDone(tx) {
 }
 
 async function dbAdd(meta, payload, sigs) {
-    const d = await db();
-    const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
-    const id = await reqP(tx.objectStore(META).add(meta));
-    tx.objectStore(PAYLOAD).put({ id, ...payload });
-    if (sigs) tx.objectStore(SIGS).put({ id, head: sigs.head, msgs: sigs.msgs });
-    await txDone(tx);
-    if (!meta.cloud) cloud.unsent?.add(meta.key);
-    return id;
+    return withDb(async d => {
+        const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
+        const id = await reqP(tx.objectStore(META).add(meta));
+        tx.objectStore(PAYLOAD).put({ id, ...payload });
+        if (sigs) tx.objectStore(SIGS).put({ id, head: sigs.head, msgs: sigs.msgs });
+        await txDone(tx);
+        if (!meta.cloud) cloud.unsent?.add(meta.key);
+        return id;
+    });
 }
 
 async function dbPutMeta(meta, sigs) {
-    const d = await db();
-    const tx = d.transaction([META, SIGS], 'readwrite');
-    tx.objectStore(META).put(meta);
-    if (sigs) tx.objectStore(SIGS).put({ id: meta.id, head: sigs.head, msgs: sigs.msgs });
-    await txDone(tx);
+    return withDb(async d => {
+        const tx = d.transaction([META, SIGS], 'readwrite');
+        tx.objectStore(META).put(meta);
+        if (sigs) tx.objectStore(SIGS).put({ id: meta.id, head: sigs.head, msgs: sigs.msgs });
+        await txDone(tx);
+    });
 }
 
 /** Mark a snapshot as uploaded — only if it still exists (it may have been merged or pruned meanwhile). */
 async function dbMarkCloud(id, ts) {
-    const d = await db();
-    const tx = d.transaction(META, 'readwrite');
-    const store = tx.objectStore(META);
-    const req = store.get(id);
-    req.onsuccess = () => { if (req.result) store.put({ ...req.result, cloud: ts }); };
-    await txDone(tx);
+    return withDb(async d => {
+        const tx = d.transaction(META, 'readwrite');
+        const store = tx.objectStore(META);
+        const req = store.get(id);
+        req.onsuccess = () => { if (req.result) store.put({ ...req.result, cloud: ts }); };
+        await txDone(tx);
+    });
 }
 
 async function dbGetSigs(id) {
-    const d = await db();
-    const tx = d.transaction(SIGS, 'readonly');
-    return await reqP(tx.objectStore(SIGS).get(id));
+    return withDb(async d => {
+        const tx = d.transaction(SIGS, 'readonly');
+        return await reqP(tx.objectStore(SIGS).get(id));
+    });
 }
 
 async function dbAllSigs() {
-    const d = await db();
-    const tx = d.transaction(SIGS, 'readonly');
-    return await reqP(tx.objectStore(SIGS).getAll());
+    return withDb(async d => {
+        const tx = d.transaction(SIGS, 'readonly');
+        return await reqP(tx.objectStore(SIGS).getAll());
+    });
 }
 
 async function dbMetaByKey(key) {
-    const d = await db();
-    const tx = d.transaction(META, 'readonly');
-    const list = await reqP(tx.objectStore(META).index('key').getAll(key));
-    return list.sort((a, b) => b.ts - a.ts);
+    return withDb(async d => {
+        const tx = d.transaction(META, 'readonly');
+        const list = await reqP(tx.objectStore(META).index('key').getAll(key));
+        return list.sort((a, b) => b.ts - a.ts);
+    });
 }
 
 async function dbAllMeta() {
-    const d = await db();
-    const tx = d.transaction(META, 'readonly');
-    const list = await reqP(tx.objectStore(META).getAll());
-    return list.sort((a, b) => b.ts - a.ts);
+    return withDb(async d => {
+        const tx = d.transaction(META, 'readonly');
+        const list = await reqP(tx.objectStore(META).getAll());
+        return list.sort((a, b) => b.ts - a.ts);
+    });
 }
 
 async function dbPayload(id) {
-    const d = await db();
-    const tx = d.transaction(PAYLOAD, 'readonly');
-    return await reqP(tx.objectStore(PAYLOAD).get(id));
+    return withDb(async d => {
+        const tx = d.transaction(PAYLOAD, 'readonly');
+        return await reqP(tx.objectStore(PAYLOAD).get(id));
+    });
 }
 
 async function dbDelete(ids) {
     if (!ids.length) return;
-    const d = await db();
-    const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
-    for (const id of ids) {
-        tx.objectStore(META).delete(id);
-        tx.objectStore(PAYLOAD).delete(id);
-        tx.objectStore(SIGS).delete(id);
-    }
-    await txDone(tx);
+    return withDb(async d => {
+        const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
+        for (const id of ids) {
+            tx.objectStore(META).delete(id);
+            tx.objectStore(PAYLOAD).delete(id);
+            tx.objectStore(SIGS).delete(id);
+        }
+        await txDone(tx);
+    });
 }
 
 async function dbClearAll() {
-    const d = await db();
-    const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
-    for (const name of [META, PAYLOAD, SIGS]) tx.objectStore(name).clear();
-    await txDone(tx);
+    return withDb(async d => {
+        const tx = d.transaction([META, PAYLOAD, SIGS], 'readwrite');
+        for (const name of [META, PAYLOAD, SIGS]) tx.objectStore(name).clear();
+        await txDone(tx);
+    });
 }
 
 // ---------------------------------------------------------------- message text & signatures
@@ -843,7 +898,7 @@ function openModal(innerHtml) {
 }
 
 async function openBrowser(key) {
-    await flush();
+    await flushBriefly();
     browserKey = key === undefined ? (currentChatInfo()?.key ?? null) : key;
     const { wrap } = openModal(`
         <div class="cab_dialog">
@@ -857,9 +912,19 @@ async function openBrowser(key) {
         </div>`);
     wrap.querySelector('#cab_scope').addEventListener('change', e => {
         browserKey = e.target.value || null;
-        renderBrowser();
+        renderBrowser().catch(showBrowserError);
     });
-    await renderBrowser();
+    await renderBrowser().catch(showBrowserError);
+}
+
+function showBrowserError(e) {
+    console.error(LOG, e);
+    const list = document.querySelector('#cab_modal #cab_list');
+    if (!list) return;
+    list.innerHTML = `<div class="cab_empty">อ่าน backup ในเครื่องไม่ได้: <code>${escapeHtml(String(e?.message ?? e))}</code><br><br>
+        <span class="menu_button" data-retry>ลองอีกครั้ง</span> <span class="menu_button" data-reload>รีโหลดหน้า</span></div>`;
+    list.querySelector('[data-retry]').addEventListener('click', () => { resetDb(); renderBrowser().catch(showBrowserError); });
+    list.querySelector('[data-reload]').addEventListener('click', () => location.reload());
 }
 
 async function renderBrowser() {
@@ -1431,17 +1496,35 @@ function setCloudRecord(key, rec) {
 // ---------------------------------------------------------------- "what happened?" dialog
 
 function onIndicatorTap(el) {
-    if (el.dataset.help) showAttention(); else openBrowser();
+    (el.dataset.help ? showAttention() : openBrowser()).catch(e => {
+        console.error(LOG, e);
+        toast.err(`เปิดหน้าต่างไม่ได้: ${e?.message ?? e}`, 'Chat Backup');
+    });
+}
+
+/** Write what is pending, but never keep a dialog from opening because a write is stuck. */
+async function flushBriefly(ms = 3000) {
+    let timer;
+    await Promise.race([
+        flush().catch(e => console.warn(LOG, e)),
+        new Promise(r => { timer = setTimeout(r, ms); }),
+    ]);
+    clearTimeout(timer);
+}
+
+function isDbLostMessage(msg) {
+    return /connection|server lost|closing|closed|ไม่ตอบสนอง|UnknownError|InvalidStateError/i.test(String(msg ?? ''));
 }
 
 /** Mark every snapshot of this chat as "not the reference any more" (user trimmed the chat on purpose). */
 async function ackShrink(key) {
     const list = await dbMetaByKey(key);
-    const d = await db();
-    const tx = d.transaction(META, 'readwrite');
-    for (const m of list) if (!m.acked) tx.objectStore(META).put({ ...m, acked: true });
-    await txDone(tx);
-    lastError = lastError?.key === key ? null : lastError;
+    return withDb(async d => {
+        const tx = d.transaction(META, 'readwrite');
+        for (const m of list) if (!m.acked) tx.objectStore(META).put({ ...m, acked: true });
+        await txDone(tx);
+        lastError = lastError?.key === key ? null : lastError;
+    });
 }
 
 /**
@@ -1449,26 +1532,38 @@ async function ackShrink(key) {
  * Problems are listed most urgent first; each carries its own buttons.
  */
 async function showAttention() {
-    await flush();
+    await flushBriefly();
     const info = currentChatInfo();
     if (!info) return openBrowser();
     const c = ctx();
     const count = Array.isArray(c.chat) ? c.chat.length : 0;
-    const list = await dbMetaByKey(info.key);
+    // Still explain the problem when the backups can't even be read — that is often the problem.
+    let list = [], readError = null;
+    try { list = await dbMetaByKey(info.key); } catch (e) { console.error(LOG, e); readError = e; }
     const newest = list[0];
     const peak = list.filter(m => !m.acked).reduce((a, b) => (!a || b.count > a.count ? b : a), null);
     const held = cloud.withheld.find(w => w.key === info.key);
     const cloudErr = dbxConnected() && cloud.error && newest && !newest.cloud ? cloud.error : '';
 
     const problems = [];
-    if (lastError && lastError.key === info.key) {
+    const writeError = lastError && lastError.key === info.key ? lastError.message : '';
+    if (writeError || readError) {
+        const msg = writeError || String(readError?.message ?? readError);
+        const lost = isDbLostMessage(msg) || !!readError;
         problems.push({
-            title: 'บันทึก backup ลงเครื่องไม่สำเร็จ',
-            body: `<p>ข้อความจาก browser: <code>${escapeHtml(lastError.message)}</code></p>
-                <p>มักเกิดจากพื้นที่ในเครื่องเต็ม หรือ browser ไม่อนุญาตให้เก็บข้อมูล (เช่น โหมดส่วนตัว) แชทบนเซิร์ฟเวอร์ไม่ได้รับผลกระทบ แต่ช่วงนี้ไม่มีสำเนาใหม่ในเครื่อง</p>`,
+            title: readError ? 'อ่าน backup ในเครื่องไม่ได้' : 'บันทึก backup ลงเครื่องไม่สำเร็จ',
+            body: `<p>ข้อความจาก browser: <code>${escapeHtml(msg)}</code></p>
+                ${lost
+                    ? '<p>browser ตัดการเชื่อมต่อฐานข้อมูลในเครื่อง — เกิดบ่อยบน iPhone/iPad หลังสลับไปแอปอื่นแล้วกลับมา backup เดิมยังอยู่ ไม่ได้หาย</p><p>กด <b>ลองบันทึกอีกครั้ง</b> ก่อน ถ้ายังไม่หายให้กด <b>รีโหลดหน้า</b> (แชทบนเซิร์ฟเวอร์ไม่ได้รับผลกระทบ)</p>'
+                    : '<p>มักเกิดจากพื้นที่ในเครื่องเต็ม หรือ browser ไม่อนุญาตให้เก็บข้อมูล (เช่น โหมดส่วนตัว) แชทบนเซิร์ฟเวอร์ไม่ได้รับผลกระทบ แต่ช่วงนี้ไม่มีสำเนาใหม่ในเครื่อง</p>'}`,
             actions: [
-                { label: 'ลองบันทึกอีกครั้ง', primary: true, run: async () => { await backupNow(); } },
-                { label: 'Export backup ทั้งหมดเก็บไว้', run: () => exportAll() },
+                { label: 'ลองบันทึกอีกครั้ง', primary: true, run: async () => {
+                    resetDb(); // start from a fresh connection
+                    await backupNow();
+                    if (lastError?.key === info.key) return 'keep'; // backupNow already showed why
+                } },
+                lost && { label: 'รีโหลดหน้า', run: () => { location.reload(); return 'keep'; } },
+                !readError && { label: 'Export backup ทั้งหมดเก็บไว้', run: () => exportAll() },
             ],
         });
     }
@@ -3024,10 +3119,11 @@ async function onChatRenamed({ avatarId, groupId, oldFileName, newFileName } = {
 async function rekeySnapshots(oldKey, newT) {
     const list = await dbMetaByKey(oldKey);
     if (list.length) {
-        const d = await db();
-        const tx = d.transaction(META, 'readwrite');
-        for (const m of list) tx.objectStore(META).put({ ...m, key: newT.key, chatId: newT.chatId });
-        await txDone(tx);
+        await withDb(async d => {
+            const tx = d.transaction(META, 'readwrite');
+            for (const m of list) tx.objectStore(META).put({ ...m, key: newT.key, chatId: newT.chatId });
+            await txDone(tx);
+        });
     }
     if (lastHashByKey.has(oldKey)) { lastHashByKey.set(newT.key, lastHashByKey.get(oldKey)); lastHashByKey.delete(oldKey); }
     if (greetingOnlyKeys.delete(oldKey)) greetingOnlyKeys.add(newT.key);
