@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.10.2'; // keep in sync with manifest.json
+const VERSION = '2.10.3'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -1789,7 +1789,7 @@ function renderSettings() {
                     <label class="checkbox_label" title="ลบแชทใน ST เครื่องนี้แล้ว ไฟล์ใน Dropbox จะถูกลบด้วย และเครื่องอื่นจะลบตามตอนซิงค์ (ถ้าเครื่องนั้นไม่ได้แก้แชทนั้นหลังซิงค์ ถ้าแก้จะถามก่อน) — ใช้เมื่อเคยซิงค์ที่นี่แล้วเท่านั้น"><input type="checkbox" id="cab_sync_deletes"> ลบแล้วลบใน Dropbox และเครื่องอื่นด้วย (แชท, การ์ด, persona, Quick Reply, regex)</label>
                     <label class="checkbox_label" title="preset ทุกประเภทที่ ST จัดการ (Chat/Text Completion, Instruct, Context, System Prompt, Reasoning…) ถ้า preset ที่เลือกใช้อยู่ถูกอัปเดตจากอีกเครื่อง จะโหลดค่าใหม่ให้"><input type="checkbox" id="cab_sync_presets"> ซิงค์ preset ด้วย</label>
                     <label class="checkbox_label" title="lorebook (World Info) ที่เป็นไฟล์แยก ถ้าเปิด lorebook นั้นค้างไว้ในหน้าแก้ จะโหลดฉบับใหม่ให้"><input type="checkbox" id="cab_sync_worlds"> ซิงค์ lorebook ด้วย</label>
-                    <label class="checkbox_label" title="ชื่อ คำอธิบาย ตำแหน่ง/ความลึก lorebook ที่ผูกไว้ การผูกกับตัวละคร และรูป persona (การเปลี่ยนแค่รูปจะไปพร้อมการแก้ครั้งถัดไป)"><input type="checkbox" id="cab_sync_personas"> ซิงค์ persona ด้วย</label>
+                    <label class="checkbox_label" title="ชื่อ คำอธิบาย ตำแหน่ง/ความลึก lorebook ที่ผูกไว้ การผูกกับตัวละคร และรูป persona (เปลี่ยนแค่รูปก็ซิงค์)"><input type="checkbox" id="cab_sync_personas"> ซิงค์ persona ด้วย</label>
                     <label class="checkbox_label" title="ชุด Quick Reply ทั้งหมด ชุดที่อัปเดตจากอีกเครื่องจะใช้ได้หลังโหลดหน้าใหม่ (จะขึ้นแจ้งเตือนให้แตะ)"><input type="checkbox" id="cab_sync_qr"> ซิงค์ Quick Reply ด้วย</label>
                     <label class="checkbox_label" title="regex แบบ global (regex ที่ผูกกับการ์ดหรือ preset ไปพร้อมการ์ด/preset อยู่แล้ว) ใช้ได้ทันที"><input type="checkbox" id="cab_sync_regex"> ซิงค์ regex ด้วย</label>
                     <label class="checkbox_label" title="Connection profile (API, URL, model, preset ที่ผูกไว้ ฯลฯ) ไม่ส่ง API key: profile ที่มาจากอีกเครื่องใช้ key ของเครื่องนี้"><input type="checkbox" id="cab_sync_cp"> ซิงค์ Connection profile ด้วย</label>
@@ -3831,7 +3831,9 @@ function watchLocalSaves() {
             // A sync writing into ST holds the lock; its own saves need no second look.
             if (cloud.lockHeld || !/\/api\//.test(url)) return;
             const kind = SAVES.find(([re]) => re.test(url))?.[1];
-            if (kind) markLocalChange([kind]);
+            // A persona picture is read from the server: look once the upload has finished too.
+            if (kind === 'persona') { markLocalChange([kind]); done.then(ok => { if (ok) markLocalChange([kind]); }).catch(() => {}); }
+            else if (kind) markLocalChange([kind]);
             else if (CARD_EDIT.test(url)) {
                 let avatar = null;
                 try { avatar = avatarOf(body); } catch { /* unreadable body: check anyway */ }
@@ -4364,24 +4366,51 @@ function localPersonas() {
     return out;
 }
 
+// A persona's hash covers its picture too (before 2.10.3 it didn't, so a picture changed or
+// added after the persona was first sent never travelled). The prefix tells the two apart.
+const PERSONA_HASH_V = 'p2:';
+const isPersonaHashV2 = h => typeof h === 'string' && h.startsWith(PERSONA_HASH_V);
+const personaHashV1 = obj => hash(stableJson(lean({ name: obj?.name, descriptor: obj?.descriptor })));
+const personaHash = (obj, imgHash) => PERSONA_HASH_V + hash(stableJson(lean({ name: obj?.name, descriptor: obj?.descriptor, img: imgHash ?? null })));
+const PERSONA_IMG_MAX = 8_000_000;
+const isImageDataUrl = v => typeof v === 'string' && v.startsWith('data:image/');
+/** The hash of a persona file's picture as it is in Dropbox. */
+const remotePersonaHash = obj => personaHash(obj, isImageDataUrl(obj?.image) ? hash(obj.image) : null);
+
 // Lorebooks are edited in place by ST's editor, so their hash is never cached by object.
-const personaHash = obj => hash(stableJson(lean({ name: obj?.name, descriptor: obj?.descriptor })));
-const itemHash = item => (item.type === 'preset' ? presetHash(item.obj)
+const itemHash = async item => (item.type === 'preset' ? presetHash(item.obj)
     : item.type === 'card' ? localCardHash(item)
-    : item.type === 'persona' ? personaHash(item.obj)
+    : item.type === 'persona' ? personaHash(item.obj, (await readPersonaImage(item.id)).h)
     : item.type === 'cp' ? cpHash(item.obj)
     : hash(stableJson(lean(item.obj))));
 
 const blobToDataUrl = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
 
-/** The persona's picture as a data URL (null when it can't be read or is very large). */
-async function personaImage(id) {
-    try {
-        const res = await fetch(`User Avatars/${encodeURIComponent(id)}`, { cache: 'no-store' });
-        if (!res.ok) return null;
-        const blob = await res.blob();
-        return blob.size && blob.size < 8_000_000 ? await blobToDataUrl(blob) : null;
-    } catch { return null; }
+// Persona file -> { fp, h }: the picture's hash, kept while the server says the file is the same.
+const personaImgCache = new Map();
+const personaImageUrl = id => `User Avatars/${encodeURIComponent(id)}`;
+
+/**
+ * A persona's picture: { dataUrl, h } — both null when it has none (or it is very large).
+ * Throws when the picture can't be read right now, so a passing error never sends a persona
+ * without its picture. needData: also return the data URL (else only the hash, from cache when
+ * the server's ETag/Last-Modified hasn't moved). fresh: bypass the browser's copy.
+ */
+async function readPersonaImage(id, { needData = false, fresh = false } = {}) {
+    const res = await fetch(personaImageUrl(id), { cache: fresh ? 'reload' : 'no-cache' });
+    if (res.status === 404) { personaImgCache.delete(id); return { dataUrl: null, h: null }; }
+    if (!res.ok) throw new Error(`อ่านรูป persona ไม่ได้ (${res.status})`);
+    const fp = ['etag', 'last-modified', 'content-length'].map(k => res.headers.get(k) ?? '').join('|');
+    const hit = personaImgCache.get(id);
+    if (!needData && !fresh && hit && fp !== '||' && hit.fp === fp) {
+        try { res.body?.cancel?.(); } catch { /* nothing to cancel */ }
+        return { dataUrl: null, h: hit.h };
+    }
+    const blob = await res.blob();
+    const dataUrl = blob.size && blob.size < PERSONA_IMG_MAX ? await blobToDataUrl(blob) : null;
+    const h = isImageDataUrl(dataUrl) ? hash(dataUrl) : null;
+    personaImgCache.set(id, { fp, h });
+    return { dataUrl: h ? dataUrl : null, h };
 }
 
 /** Save a lorebook through ST, keeping its cache, list and open editor up to date. */
@@ -4398,15 +4427,21 @@ async function applyPersona(id, obj, local) {
     const c = ctx();
     const pu = c.powerUserSettings;
     if (!pu) throw new Error('ST รุ่นนี้ไม่เปิดให้แก้ persona จาก extension');
-    if (obj.image) {
+    if (isImageDataUrl(obj.image)) {
+        // The picture first: if it doesn't go in, nothing changes and the next sync tries again.
         const blob = await (await fetch(obj.image)).blob();
         const form = new FormData();
-        form.append('avatar', new File([blob], id, { type: blob.type || 'image/png' }));
         form.append('overwrite_name', id);
+        form.append('avatar', new File([blob], id, { type: blob.type || 'image/png' }));
         const headers = { ...c.getRequestHeaders() };
         delete headers['Content-Type'];
         const res = await fetch('/api/avatars/upload', { method: 'POST', headers, body: form });
-        if (!res.ok) console.warn(LOG, 'persona picture upload failed', res.status);
+        if (!res.ok) throw new Error(`ใส่รูป persona ${obj.name || id} ไม่สำเร็จ (${res.status})`);
+        personaImgCache.delete(id);
+        // Same file name as before: make the browser drop its old copy of the picture.
+        for (const url of [personaImageUrl(id), `/thumbnail?type=persona&file=${encodeURIComponent(id)}`]) {
+            await fetch(url, { cache: 'reload' }).catch(() => null);
+        }
     }
     // The active persona's description is copied into power_user; keep that copy in step.
     const old = local?.obj?.descriptor;
@@ -5173,7 +5208,7 @@ async function downloadItem(entry) {
     }
     if (entry.type === 'persona') {
         const obj = await readObj();
-        return { obj, hash: personaHash(obj) };
+        return { obj, hash: remotePersonaHash(obj) };
     }
     const blob = await dbxDownloadBlob(`rev:${entry.rev}`);
     return { blob, hash: cardDataHash(await cardFromPng(blob)) };
@@ -5190,8 +5225,9 @@ async function uploadItem(item, h, rev) {
         blob = new Blob([JSON.stringify(item.obj, null, 4)], { type: 'application/octet-stream' });
     } else if (item.type === 'persona') {
         path = personaPath(item.id);
-        // The picture travels along, but only name and description count as a change.
-        blob = new Blob([JSON.stringify({ ...item.obj, image: await personaImage(item.id) })], { type: 'application/octet-stream' });
+        const img = await readPersonaImage(item.id, { needData: true });
+        h = personaHash(item.obj, img.h); // the picture as sent, even if it changed since `h` was taken
+        blob = new Blob([JSON.stringify({ ...item.obj, image: img.dataUrl })], { type: 'application/octet-stream' });
     } else {
         path = cardPath(item.avatar);
         const res = await fetch('/api/characters/export', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ format: 'png', avatar_url: item.avatar }) });
@@ -5253,6 +5289,79 @@ async function applyCard(avatar, blob, localCh) {
         }).catch(() => null);
     }
     cardHashCache.delete(avatar);
+}
+
+/**
+ * The matched state after writing an item from Dropbox. ST re-encodes a persona picture it
+ * receives, so its file here no longer hashes like Dropbox's copy: take this side's own reading.
+ * A Dropbox copy without a picture keeps Dropbox's hash, so a picture this side has goes up next.
+ */
+async function hashAfterApply(entry, content, key) {
+    if (entry.type !== 'persona' || !isImageDataUrl(content.obj?.image)) return content.hash;
+    const obj = localPersonas().get(key)?.obj ?? content.obj;
+    try { return personaHash(obj, (await readPersonaImage(entry.id, { fresh: true })).h); } catch { return content.hash; }
+}
+
+/** Do two pictures look the same? (ST re-encodes, and may resize, a persona picture it receives.) */
+async function samePicture(a, b) {
+    if (a === b) return true;
+    try {
+        const load = url => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+        const [x, y] = await Promise.all([load(a), load(b)]);
+        if (!x.naturalWidth || !y.naturalWidth || Math.abs(x.naturalWidth / x.naturalHeight - y.naturalWidth / y.naturalHeight) > 0.02) return false;
+        const W = 48, H = 48;
+        const pixels = im => {
+            const cv = document.createElement('canvas');
+            cv.width = W; cv.height = H;
+            const g = cv.getContext('2d', { willReadFrequently: true });
+            g.drawImage(im, 0, 0, W, H);
+            return g.getImageData(0, 0, W, H).data;
+        };
+        const p = pixels(x), q = pixels(y);
+        let diff = 0;
+        for (let i = 0; i < p.length; i++) diff += Math.abs(p[i] - q[i]);
+        return diff / p.length < 6;
+    } catch { return false; }
+}
+
+/**
+ * A persona matched before 2.10.3 has a hash that leaves out its picture. Turn it into a full
+ * one by looking at the matched revision in Dropbox's history next to this side's picture:
+ * - Dropbox's copy has no picture, this side has one: this side is ahead and sends it.
+ * - Dropbox's copy has a picture, this side has none: it never arrived here; take Dropbox's.
+ * - Both have one: the same picture (ST re-encodes what it receives) counts as matched, a
+ *   different one as changed here.
+ * A name or description changed here since the match counts as changed here, as before.
+ */
+async function migratePersonaBase(key, B, L, R) {
+    let old = null;
+    try {
+        old = JSON.parse(await dbxDownloadText(`rev:${B.rev}`));
+        if (typeof old === 'string') old = JSON.parse(old);
+        if (!isPlainObject(old)) old = null;
+    } catch (e) {
+        if (R && R.rev === B.rev) throw e; // the current revision: try again next sync
+        old = null; // gone from Dropbox's history
+    }
+    const sameText = !!L && personaHashV1(L.obj) === B.hash;
+    let rec;
+    if (!old) rec = { ...B, hash: sameText ? await itemHash(L) : `${PERSONA_HASH_V}legacy` };
+    else if (!sameText) rec = { ...B, hash: remotePersonaHash(old) };
+    else {
+        const img = await readPersonaImage(L.id, { needData: true });
+        const lh = personaHash(L.obj, img.h);
+        const theirs = isImageDataUrl(old.image) ? old.image : null;
+        if (!theirs) rec = { ...B, hash: img.h ? remotePersonaHash(old) : lh };
+        else if (!img.dataUrl) rec = { ...B, rev: 'legacy', hash: lh }; // looks moved in Dropbox: taken from there
+        else rec = { ...B, hash: (await samePicture(img.dataUrl, theirs)) ? lh : remotePersonaHash(old) };
+    }
+    setItemBase(key, rec);
+    return rec;
+}
+
+/** Show personas written from Dropbox in ST's persona list (pictures included) without a reload. */
+async function refreshPersonaList() {
+    try { await (await stPersonas())?.getUserAvatars?.(true); } catch (e) { console.warn(LOG, e); }
 }
 
 async function applyItem(entry, content, local) {
@@ -5343,6 +5452,8 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         if (key.includes(':') && !B?.deleted && !remote.has(key) && !tombs.has(key)) moved.add(kindOfKey(key)); // gone from Dropbox
     }
     if (bases[REGEX_ORDER_KEY]?.rev !== regexOrder?.rev) moved.add('rx');
+    // Personas matched before pictures counted: look at them once so the pictures go across.
+    if (Object.entries(bases).some(([k, B]) => k.startsWith('persona:') && B && !B.deleted && B.rev && B.hash !== 'invalid' && !isPersonaHashV2(B.hash))) moved.add('persona');
     // "ซิงค์ตอนนี้" compares everything; so does an automatic sync every so often (safety net).
     if (!auto || Date.now() - itemsFullAt > ITEMS_FULL_EVERY_MS) for (const k of ITEM_KINDS) itemsDirty.add(k);
     const dirty = new Set(itemsDirty);
@@ -5380,14 +5491,19 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         const deleted = deletedHere();
         const deadline = auto ? Date.now() + 15_000 : Infinity;
         const cardsApplied = [];
+        let personasApplied = 0;
         let i = 0;
         for (; i < keys.length && Date.now() < deadline; i++) {
             const key = keys[i];
-            const L = local.get(key), R = remote.get(key), B = itemBase(key), T = tombs.get(key);
+            const L = local.get(key), R = remote.get(key), T = tombs.get(key);
+            let B = itemBase(key);
             if (L && deleted.has(key)) { forgetDeletedHere(key); deleted.delete(key); } // made again here
             const label = (L || R || T).label;
             syncProgress(`กำลังตรวจ preset/การ์ด/lorebook/persona/QR/regex/profile ${i + 1}/${keys.length}…`, `preset/การ์ด/อื่น ๆ ${i + 1}/${keys.length}`);
             try {
+                if (key.startsWith('persona:') && B && !B.deleted && B.rev && B.hash !== 'invalid' && !isPersonaHashV2(B.hash)) {
+                    B = await migratePersonaBase(key, B, L, R);
+                }
                 if (!R && T) {
                     // Deleted on another device.
                     if (!L) { setItemBase(key, { deleted: true, rev: T.rev }); forgetDeletedHere(key); deleted.delete(key); continue; }
@@ -5468,8 +5584,9 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 if (!L || (B && lh === B.hash)) {
                     badgeApply(L?.label ?? R.label);
                     await applyItem(R, content, L);
-                    setItemBase(key, { rev: R.rev, hash: content.hash });
+                    setItemBase(key, { rev: R.rev, hash: await hashAfterApply(R, content, key) });
                     if (R.type === 'card') cardsApplied.push({ key, rev: R.rev });
+                    if (R.type === 'persona') personasApplied++;
                     out.itemsApplied.push(L?.label ?? R.label);
                     continue;
                 }
@@ -5488,6 +5605,7 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         if (need.has('cp')) {
             try { await dedupeConnProfiles(out); } catch (e) { out.errors.push(`Connection profile ซ้ำ: ${e?.message ?? e}`); }
         }
+        if (personasApplied) await refreshPersonaList();
         const notListed = await refreshCardsAfter(cardsApplied);
         if (notListed.length) out.errors.push(`นำเข้าการ์ดแล้วแต่ไม่ขึ้นในรายการตัวละคร: ${notListed.map(x => x.replace(/^card:/, '')).join(', ')}`);
         if (need.has('rx') && Date.now() < deadline) {
@@ -5528,8 +5646,9 @@ async function resolveItem(x, how) {
         return copy;
     }
     await applyItem(x.entry, content, x.item);
-    setItemBase(key, { rev: x.rev, hash: content.hash });
+    setItemBase(key, { rev: x.rev, hash: await hashAfterApply(x.entry, content, key) });
     if (x.entry.type === 'card') await refreshCardsAfter([{ key, rev: x.rev }]);
+    if (x.entry.type === 'persona') await refreshPersonaList();
 }
 
 // ---------------------------------------------------------------- leftovers from Pocky chat vault
