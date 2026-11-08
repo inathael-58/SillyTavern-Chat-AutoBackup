@@ -7,6 +7,7 @@
  * server), gzip-compressed, de-duplicated, and pruned per chat.
  */
 
+import { createDiagnostics } from './diagnostics.js';
 const MODULE = 'chat_autobackup';
 const DB_NAME = 'ST_ChatAutoBackup';
 const DB_VERSION = 2;
@@ -16,7 +17,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.10.4'; // keep in sync with manifest.json
+const VERSION = '2.10.5'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -47,6 +48,19 @@ const EDGE_MARGIN = 8; // px gap between the snapped button and the screen edge
 // ---------------------------------------------------------------- helpers
 
 const ctx = () => SillyTavern.getContext();
+
+// Extensions > Chat Auto Backup > Diagnose (and /backup-debug): opens the backup list, measures it, reports.
+const DIAG = createDiagnostics({
+    name: 'Chat Backup',
+    version: VERSION,
+    baseUrl: BASE_URL,
+    open: () => openBrowser(),
+    close: () => document.getElementById('cab_modal')?._cabClose?.(),
+    isOpen: () => !!document.getElementById('cab_modal'),
+    overlay: () => document.getElementById('cab_modal'),
+    frame: () => document.querySelector('#cab_modal .cab_dialog'),
+    state: () => `indicator=${settings().showIndicator} pos=${JSON.stringify(settings().indicatorPos ?? null)}`,
+});
 
 function settings() {
     const ext = ctx().extensionSettings;
@@ -865,6 +879,7 @@ function openModal(innerHtml) {
 
     const wrap = document.createElement('div');
     wrap.id = 'cab_modal';
+    DIAG.noteOpen();
     wrap.innerHTML = innerHtml;
     document.body.appendChild(wrap);
 
@@ -884,6 +899,7 @@ function openModal(innerHtml) {
     const onKey = e => { if (e.key === 'Escape') close(); };
     document.addEventListener('keydown', onKey);
     function close() {
+        DIAG.noteClose();
         vv?.removeEventListener('resize', fit);
         vv?.removeEventListener('scroll', fit);
         window.removeEventListener('resize', fit);
@@ -1832,6 +1848,7 @@ function renderSettings() {
     const host = document.getElementById('extensions_settings2') ?? document.getElementById('extensions_settings');
     if (!host) return;
     host.insertAdjacentHTML('beforeend', html);
+    DIAG.mount(document.getElementById('cab_indicator_reset')?.parentElement);
 
     const $ = id => document.getElementById(id);
     const bindCheck = (id, key, after) => {
@@ -2024,7 +2041,7 @@ async function reloadWithFreshFiles() {
         await flush();
         // cache: 'reload' fetches from the server and overwrites the browser's cached copy,
         // so the page reload below picks up the new files.
-        await Promise.all(['index.js', 'style.css', 'manifest.json'].map(f =>
+        await Promise.all(['index.js', 'diagnostics.js', 'style.css', 'manifest.json'].map(f =>
             fetch(new URL(f, BASE_URL), { cache: 'reload' }).catch(() => null)));
     } finally {
         location.reload();
@@ -5881,6 +5898,7 @@ async function init() {
     try { await navigator.storage?.persist?.(); } catch { /* ignore */ }
     try { await db(); } catch (e) { toast.err('เปิด IndexedDB ไม่ได้: ' + (e?.message ?? e)); }
     updateIndicator();
+    DIAG.registerCommand(ctx(), 'backup-debug');
     wireDbxPanel();
     setTimeout(checkForNewVersion, 3000);
     wirePockyPanel();
