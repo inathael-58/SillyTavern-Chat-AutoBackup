@@ -1,8 +1,25 @@
 /* Chat Auto Backup — uses SillyTavern theme variables so it follows any theme */
 
+/* Never wider than the extensions drawer. iOS Safari doesn't break long words, file names
+ * or "a/b/c" the way Chrome does, so one long status line used to widen the whole panel
+ * and the page could be dragged sideways. `anywhere` (unlike break-word) also shrinks the
+ * min-content width, so flex/grid parents can't be pushed wider by text. */
+#cab_settings {
+    max-width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    overflow-x: clip;
+}
+#cab_settings .inline-drawer-content { min-width: 0; max-width: 100%; }
+#cab_settings .menu_button { max-width: 100%; box-sizing: border-box; white-space: normal; }
+#cab_settings input,
+#cab_settings select { max-width: 100%; min-width: 0; box-sizing: border-box; }
+#cab_settings .cab_grid > * { min-width: 0; }
+#cab_settings .cab_grid select { width: 100%; }
+
 .cab_settings .cab_grid {
     display: grid;
-    grid-template-columns: 1fr 90px;
+    grid-template-columns: minmax(0, 1fr) 90px;
     gap: 4px 8px;
     align-items: center;
     margin: 6px 0;
