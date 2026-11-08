@@ -16,7 +16,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.10.3'; // keep in sync with manifest.json
+const VERSION = '2.10.4'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -892,7 +892,9 @@ function openModal(innerHtml) {
     }
 
     wrap._cabClose = close;
-    wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+    // Ignore a backdrop click right after opening: it belongs to the tap that opened the dialog.
+    const openedAt = Date.now();
+    wrap.addEventListener('click', e => { if (e.target === wrap && Date.now() - openedAt > 450) close(); });
     wrap.querySelector('.cab_close')?.addEventListener('click', close);
     return { wrap, close };
 }
@@ -1321,12 +1323,23 @@ function makeDraggable(el) {
     const THRESHOLD = 6; // px of movement before a press counts as a drag
     let start = null;
     let dragged = false;
+    let skipClick = false;
+
+    // Open on click, not pointerup: opened on pointerup, the dialog can appear under the finger and the
+    // click that follows the same tap lands on its backdrop, which closes it again at once.
+    el.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (skipClick) { skipClick = false; return; } // the click that ends a drag
+        onIndicatorTap(el);
+    });
 
     el.addEventListener('pointerdown', e => {
         if (e.button !== 0) return;
         const r = el.getBoundingClientRect();
         start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, id: e.pointerId };
         dragged = false;
+        skipClick = false;
         try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     });
 
@@ -1345,10 +1358,8 @@ function makeDraggable(el) {
         if (!start || e.pointerId !== start.id) return;
         try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
         start = null;
-        if (!dragged) {
-            if (e.type === 'pointerup') onIndicatorTap(el);
-            return;
-        }
+        if (!dragged) return; // a plain tap: the click handler opens the list
+        skipClick = true;
         el.classList.remove('cab_dragging');
         if (e.type === 'pointerup') snapIndicator(el);
         placeIndicator(el);
