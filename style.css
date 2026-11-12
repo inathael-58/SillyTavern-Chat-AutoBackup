@@ -322,3 +322,15 @@
 #cab_modal .cab_pick { max-height: 45vh; overflow-y: auto; margin: 6px 0 8px; }
 #cab_modal .cab_pick .checkbox_label { align-items: flex-start; gap: 8px; padding: 4px 0; }
 #cab_modal .cab_problem .text_pole { width: 100%; margin: 4px 0; }
+
+/* ---------------------------------------------------------------- solid surfaces
+   Blur Tint often carries alpha: glass themes pair it with a backdrop blur. A surface
+   with no blur of its own (a sticky header, or any panel once Fast UI's body.no-blur
+   strips every backdrop-filter) would let the chat or the list underneath show through,
+   so those paint the tint with its alpha dropped. `/ 1` matters: relative colour keeps
+   the source alpha when it is left out. */
+#cab_modal { --cab-solid: var(--SmartThemeBlurTintColor, #222); }
+@supports (color: rgb(from red r g b / 1)) {
+    #cab_modal { --cab-solid: rgb(from var(--SmartThemeBlurTintColor, #222) r g b / 1); }
+}
+body.no-blur #cab_modal .cab_dialog { background: var(--cab-solid); }
