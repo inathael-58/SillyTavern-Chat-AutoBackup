@@ -334,3 +334,15 @@
     #cab_modal { --cab-solid: rgb(from var(--SmartThemeBlurTintColor, #222) r g b / 1); }
 }
 body.no-blur #cab_modal .cab_dialog { background: var(--cab-solid); }
+
+/* แม่แบบสีที่อ่านออกเสมอ (theme-palette.js) — เฉพาะแผงที่แสดงข้อมูล: พื้นทึบ และสีเน้น/ตัวอักษรตัดกับพื้นจริง
+   ทำงานเมื่อคำนวณสีสำเร็จแล้วเท่านั้น (<html class="cab-pal">) ถ้าไม่สำเร็จจะใช้สีธีมตรง ๆ แบบเดิม
+   ป้ายสถานะลอย (#cab_indicator) ไม่อยู่ในนี้ — คงความโปร่งไว้ให้กลืนกับหน้าจอ */
+html.cab-pal :is(#cab_modal, #cab_settings, .cab_settings) {
+    --SmartThemeBlurTintColor: var(--cab-p-surface);
+    --SmartThemeBodyColor: var(--cab-p-fg);
+    --SmartThemeQuoteColor: var(--cab-p-accent-text);
+    --SmartThemeEmColor: var(--cab-p-em);
+    --SmartThemeUnderlineColor: var(--cab-p-underline);
+    --SmartThemeBorderColor: var(--cab-p-line);
+}

@@ -8,6 +8,7 @@
  */
 
 import { createDiagnostics } from './diagnostics.js';
+import { installThemePalette } from './theme-palette.js';
 const MODULE = 'chat_autobackup';
 const DB_NAME = 'ST_ChatAutoBackup';
 const DB_VERSION = 2;
@@ -17,7 +18,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.10.6'; // keep in sync with manifest.json
+const VERSION = '2.10.7'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -2041,7 +2042,7 @@ async function reloadWithFreshFiles() {
         await flush();
         // cache: 'reload' fetches from the server and overwrites the browser's cached copy,
         // so the page reload below picks up the new files.
-        await Promise.all(['index.js', 'diagnostics.js', 'style.css', 'manifest.json'].map(f =>
+        await Promise.all(['index.js', 'diagnostics.js', 'theme-palette.js', 'style.css', 'manifest.json'].map(f =>
             fetch(new URL(f, BASE_URL), { cache: 'reload' }).catch(() => null)));
     } finally {
         location.reload();
@@ -5890,6 +5891,8 @@ function wirePockyPanel() {
 }
 
 async function init() {
+    // สีที่อ่านออกเสมอ: แผงข้อมูลทึบ สีเน้นตัดกับพื้นจริง (ดู theme-palette.js)
+    try { installThemePalette({ prefix: 'cab' }); } catch (err) { console.warn('[Chat Auto Backup] theme palette', err); }
     settings();
     renderSettings();
     wireEvents();
