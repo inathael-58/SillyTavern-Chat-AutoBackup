@@ -1,6 +1,6 @@
 // theme-palette.js — แม่แบบสีที่อ่านออกเสมอ สำหรับ extension ของ SillyTavern
 // ใช้ร่วมกันในทุก extension ของ inathael-58 · คัดลอกไฟล์นี้ทั้งไฟล์ อย่าแก้แยกที่ใดที่หนึ่ง
-// PALETTE_VERSION 1
+// PALETTE_VERSION 3
 //
 // ปัญหาที่แก้:
 //  1. ช่องสีของธีม (Quote/Italics/Underline) ถูกตั้งให้ตัดกับ "พื้นแชท" แต่แผงของ extension วางบน "พื้น UI"
@@ -29,13 +29,20 @@
 //       --SmartThemeEmColor: var(--pw-p-em);              --SmartThemeUnderlineColor: var(--pw-p-underline);
 //   }
 //
+// พื้นตายตัวของ extension เอง (เช่น โหมดสว่าง/มืดที่ผู้ใช้เลือก): ส่ง surfaces แล้วได้สีเน้นที่ตัดกับพื้นนั้น
+//   installThemePalette({ prefix: 'cbp', surfaces: { light: '#fbfaf7', dark: '#1b1a21' } })
+//   → --cbp-p-accent-light, --cbp-p-accent-dark  (≥4.5:1 กับพื้นนั้น คงโทนสีเน้นของธีม)
+//
+// สีประจำตัวของ extension ที่ใช้เป็นตัวอักษรบนแผง: ส่ง colors แล้วได้เวอร์ชันที่อ่านออกบนพื้นแผง (คงโทนเดิม)
+//   installThemePalette({ prefix: 'ec', colors: { sun: '#f2a03d' } })  →  --ec-p-sun  (≥4.5:1)
+//
 // ใช้:
 //   import { installThemePalette } from './theme-palette.js';
 //   const palette = installThemePalette({ prefix: 'pw' });          // สีเน้นจาก Quote
 //   palette.setAccent('em');                                          // เปลี่ยนช่องสีเน้น
 //   ใน CSS:  --pw-accent: var(--pw-p-accent, var(--SmartThemeQuoteColor));   (ค่าเดิมเป็นสำรอง)
 
-export const PALETTE_VERSION = 1;
+export const PALETTE_VERSION = 3;
 
 export const ACCENT_SOURCES = Object.freeze({
     quote: '--SmartThemeQuoteColor',
@@ -90,7 +97,7 @@ const mix = (a, b, t) => a.map((v, i) => v * (1 - t) + b[i] * t);
 const css = c => `rgb(${c.map(v => Math.round(Math.max(0, Math.min(255, v)))).join(', ')})`;
 
 /** คำนวณชุดสีจากสีธีมที่อ่านมา (ฟังก์ชันล้วน ใช้ทดสอบได้) */
-export function computePalette(theme, accentName = 'quote') {
+export function computePalette(theme, accentName = 'quote', surfaces = {}, colors = {}) {
     const tint = theme['--SmartThemeBlurTintColor'], chat = theme['--SmartThemeChatTintColor'];
     // พื้น UI ที่โปร่งเกือบหมด มักไม่มีความหมายของสีจริง — ใช้พื้นแชทแทน
     const pick = tint && tint[3] >= 0.08 ? tint : chat && chat[3] >= 0.08 ? chat : tint;
@@ -127,8 +134,22 @@ export function computePalette(theme, accentName = 'quote') {
         warn: css(status(38, 0.9)),
         danger: css(status(356, 0.78)),
         c1: css(hue(60)), c2: css(hue(140)), c3: css(hue(200)), c4: css(hue(260)), c5: css(hue(320, 0.8)), c6: css(hue(30, 0.3)),
+        ...Object.fromEntries(Object.entries(surfaces).map(([name, value]) => {
+            const s = parseColor(value) ?? hexToRgb(value);
+            return s ? [`accent-${name}`, css(ensureContrast(raw, s.slice(0, 3), 4.5))] : null;
+        }).filter(Boolean)),
+        ...Object.fromEntries(Object.entries(colors).map(([name, value]) => {
+            const c = parseColor(value) ?? hexToRgb(value);
+            return c ? [name, css(ensureContrast(c.slice(0, 3), bg, 4.5))] : null;
+        }).filter(Boolean)),
         light,
     };
+}
+function hexToRgb(hex) {
+    const m = String(hex || '').trim().match(/^#?([\da-f]{3}|[\da-f]{6})$/i);
+    if (!m) return null;
+    const h = m[1].length === 3 ? m[1].replace(/./g, c => c + c) : m[1];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), 1];
 }
 
 // ── ติดตั้ง ──
@@ -149,11 +170,13 @@ function readTheme() {
 }
 
 /**
- * @param {{ prefix: string, accent?: string|(() => string) }} opts
+ * @param {{ prefix: string, accent?: string|(() => string), surfaces?: Record<string, string>, colors?: Record<string, string> }} opts
  * prefix  ชื่อนำหน้าตัวแปร เช่น 'pw' → --pw-p-accent
  * accent  ชื่อช่องสีเน้น ('quote' | 'em' | 'underline' | 'body') หรือฟังก์ชันที่คืนชื่อนั้น
+ * surfaces  พื้นตายตัวของ extension { ชื่อ: สี } → ได้ --{prefix}-p-accent-{ชื่อ}
+ * colors    สีประจำตัวของ extension { ชื่อ: สี } → ได้ --{prefix}-p-{ชื่อ} ที่อ่านออกบนพื้นแผง
  */
-export function installThemePalette({ prefix, accent = 'quote' } = {}) {
+export function installThemePalette({ prefix, accent = 'quote', surfaces = {}, colors = {} } = {}) {
     if (!prefix) throw new Error('theme-palette: prefix required');
     let accentOf = typeof accent === 'function' ? accent : () => accent;
     let last = '';
@@ -163,7 +186,7 @@ export function installThemePalette({ prefix, accent = 'quote' } = {}) {
 
     function refresh() {
         try {
-            const p = computePalette(readTheme(), accentOf());
+            const p = computePalette(readTheme(), accentOf(), surfaces, colors);
             if (!p) return null;
             const key = JSON.stringify(p);
             if (key !== last) {
