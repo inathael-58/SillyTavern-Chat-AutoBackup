@@ -9,6 +9,7 @@
 
 import { createDiagnostics } from './diagnostics.js';
 import { installThemePalette } from './theme-palette.js';
+import { floatColors, COLOR_MODE_LABELS } from './float-colors.js';
 const MODULE = 'chat_autobackup';
 const DB_NAME = 'ST_ChatAutoBackup';
 const DB_VERSION = 2;
@@ -18,7 +19,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.10.7'; // keep in sync with manifest.json
+const VERSION = '2.11.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -32,6 +33,11 @@ const DEFAULTS = Object.freeze({
     mergeSwipes: true,       // replace the newest snapshot when only the last message's swipes changed
     showIndicator: true,     // floating status button over the chat
     indicatorFontSize: 12,   // px
+    // Status button colours: 'auto' adapts to the theme palette (always readable) · 'custom' = indicatorColors on every theme
+    indicatorTextColor: 'auto',
+    indicatorBgColor: 'auto',
+    indicatorColors: Object.freeze({ text: '#e18a24', bg: '#1e1e28' }),
+    indicatorBgOpacity: 80,  // % — background (100% while touched or dragged)
     // Where the floating button sits. x/y are fractions (0–1) of the space the
     // button can travel across the screen; `edge` is the screen edge it is
     // snapped to (null = free, e.g. after "reset to centre").
@@ -1411,11 +1417,24 @@ function resetIndicatorPosition() {
     placeIndicator();
 }
 
+let palette = null; // theme-palette.js handle
+
 function applyIndicatorStyle(el = document.getElementById('cab_indicator')) {
     if (!el) return;
     const s = settings();
     const size = clamp(Number(s.indicatorFontSize) || DEFAULTS.indicatorFontSize, 8, 40);
     el.style.setProperty('--cab-font-size', `${size}px`);
+    // adaptive colours from the theme palette, readable on the button's background (float-colors.js)
+    const own = (key, which) => (s[key] === 'custom' ? s.indicatorColors?.[which] || DEFAULTS.indicatorColors[which] : null);
+    const c = floatColors(palette?.current, { fg: own('indicatorTextColor', 'text'), bg: own('indicatorBgColor', 'bg') });
+    const prop = (k, v) => (v ? el.style.setProperty(k, v) : el.style.removeProperty(k));
+    prop('--cab-fg', c?.fg);
+    prop('--cab-bg', c?.bg);
+    prop('--cab-muted', c?.muted);
+    prop('--cab-line', c?.border);
+    prop('--cab-danger', c?.danger);
+    const op = Number(s.indicatorBgOpacity);
+    el.style.setProperty('--cab-bg-op', `${clamp(Number.isFinite(op) ? op : DEFAULTS.indicatorBgOpacity, 0, 100)}%`);
     placeIndicator(el); // size change moves the edges
 }
 
@@ -1712,6 +1731,7 @@ async function showAttention() {
 
 function renderSettings() {
     const s = settings();
+    const colorModeOptions = Object.entries(COLOR_MODE_LABELS).map(([k, name]) => `<option value="${k}">${name}</option>`).join('');
     const html = `
     <div id="cab_settings" class="cab_settings">
         <div class="inline-drawer">
@@ -1763,6 +1783,15 @@ function renderSettings() {
                     <label for="cab_indicator_size">ขนาดตัวอักษรปุ่ม (px)</label>
                     <input type="number" id="cab_indicator_size" class="text_pole" min="8" max="40" step="1">
                 </div>
+                <div class="cab_grid cab_grid_colors">
+                    <label for="cab_ind_text">สีตัวอักษรปุ่ม</label>
+                    <div class="cab_colorpick"><select id="cab_ind_text" class="text_pole">${colorModeOptions}</select><input type="color" id="cab_ind_text_pick" aria-label="สีตัวอักษรปุ่ม (เลือกเอง)"></div>
+                    <label for="cab_ind_bg">สีพื้นปุ่ม</label>
+                    <div class="cab_colorpick"><select id="cab_ind_bg" class="text_pole">${colorModeOptions}</select><input type="color" id="cab_ind_bg_pick" aria-label="สีพื้นปุ่ม (เลือกเอง)"></div>
+                    <label for="cab_ind_bgop">ความทึบพื้นปุ่ม</label>
+                    <div class="cab_colorpick"><input type="range" id="cab_ind_bgop" min="0" max="100" step="5"><output id="cab_ind_bgop_out"></output></div>
+                </div>
+                <small class="cab_note">ปรับตามธีม = ดึงสีจากแม่แบบสีของธีมที่ใช้อยู่ ปรับให้อ่านง่ายบนพื้นปุ่มเสมอ · เลือกสีเอง = ใช้สีนั้นทุกธีม</small>
                 <div class="cab_buttons">
                     <div id="cab_indicator_reset" class="menu_button" title="ย้ายปุ่มสถานะกลับมากลางจอ (ใช้เมื่อปุ่มหลุดไปอยู่ที่หาไม่เจอ)"><i class="fa-solid fa-crosshairs"></i> รีเซ็ตตำแหน่งปุ่ม</div>
                 </div>
@@ -1889,6 +1918,28 @@ function renderSettings() {
         const v = Math.min(40, Math.max(8, Math.round(Number(e.target.value)) || DEFAULTS.indicatorFontSize));
         s.indicatorFontSize = v;
         e.target.value = v;
+        saveSettings();
+        applyIndicatorStyle();
+    });
+
+    const colorInputs = [['cab_ind_text', 'indicatorTextColor', 'text'], ['cab_ind_bg', 'indicatorBgColor', 'bg']];
+    s.indicatorColors = { ...DEFAULTS.indicatorColors, ...(s.indicatorColors || {}) };
+    const showColors = () => colorInputs.forEach(([id, key, which]) => {
+        $(id).value = s[key] === 'custom' ? 'custom' : 'auto';
+        $(`${id}_pick`).value = s.indicatorColors[which];
+        $(`${id}_pick`).hidden = s[key] !== 'custom';
+    });
+    for (const [id, key, which] of colorInputs) {
+        $(id).addEventListener('change', e => { s[key] = e.target.value; saveSettings(); showColors(); applyIndicatorStyle(); });
+        $(`${id}_pick`).addEventListener('input', e => { s.indicatorColors = { ...s.indicatorColors, [which]: e.target.value }; saveSettings(); applyIndicatorStyle(); });
+    }
+    showColors();
+    const bgop = $('cab_ind_bgop'), bgopOut = $('cab_ind_bgop_out');
+    bgop.value = s.indicatorBgOpacity;
+    bgopOut.textContent = `${s.indicatorBgOpacity}%`;
+    bgop.addEventListener('input', e => {
+        s.indicatorBgOpacity = Number(e.target.value);
+        bgopOut.textContent = `${s.indicatorBgOpacity}%`;
         saveSettings();
         applyIndicatorStyle();
     });
@@ -2042,7 +2093,7 @@ async function reloadWithFreshFiles() {
         await flush();
         // cache: 'reload' fetches from the server and overwrites the browser's cached copy,
         // so the page reload below picks up the new files.
-        await Promise.all(['index.js', 'diagnostics.js', 'theme-palette.js', 'style.css', 'manifest.json'].map(f =>
+        await Promise.all(['index.js', 'diagnostics.js', 'theme-palette.js', 'float-colors.js', 'style.css', 'manifest.json'].map(f =>
             fetch(new URL(f, BASE_URL), { cache: 'reload' }).catch(() => null)));
     } finally {
         location.reload();
@@ -5892,7 +5943,8 @@ function wirePockyPanel() {
 
 async function init() {
     // สีที่อ่านออกเสมอ: แผงข้อมูลทึบ สีเน้นตัดกับพื้นจริง (ดู theme-palette.js)
-    try { installThemePalette({ prefix: 'cab' }); } catch (err) { console.warn('[Chat Auto Backup] theme palette', err); }
+    // ป้ายสถานะลอยแบบ "ปรับตามธีม" ก็ดึงสีจากชุดนี้ (float-colors.js) แล้วคำนวณใหม่เมื่อเปลี่ยนธีม
+    try { palette = installThemePalette({ prefix: 'cab' }); palette.onChange(() => applyIndicatorStyle()); } catch (err) { console.warn('[Chat Auto Backup] theme palette', err); }
     settings();
     renderSettings();
     wireEvents();
