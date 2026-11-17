@@ -357,3 +357,7 @@ html.cab-pal :is(#cab_modal, #cab_settings, .cab_settings) {
     --SmartThemeUnderlineColor: var(--cab-p-underline);
     --SmartThemeBorderColor: var(--cab-p-line);
 }
+
+/* ST's plain .menu_button is display:flex, which drops the space between an icon and its
+   label. Zero-specificity roots, so a gap this extension already sets still wins. */
+:where([class^="cab_"], [class*=" cab_"], [id^="cab_"]) .menu_button { gap: 0.4em; }

@@ -1,6 +1,6 @@
 // theme-palette.js — แม่แบบสีที่อ่านออกเสมอ สำหรับ extension ของ SillyTavern
 // ใช้ร่วมกันในทุก extension ของ inathael-58 · คัดลอกไฟล์นี้ทั้งไฟล์ อย่าแก้แยกที่ใดที่หนึ่ง
-// PALETTE_VERSION 3
+// PALETTE_VERSION 4
 //
 // ปัญหาที่แก้:
 //  1. ช่องสีของธีม (Quote/Italics/Underline) ถูกตั้งให้ตัดกับ "พื้นแชท" แต่แผงของ extension วางบน "พื้น UI"
@@ -16,7 +16,7 @@
 //   fg           ตัวอักษรหลัก                      muted      ตัวอักษรรอง
 //   line         เส้นขอบ                           accent     สีเน้นจากช่องที่เลือก (≥3:1 ขอบ/ไอคอน/กราฟ)
 //   accent-text  สีเน้นสำหรับตัวอักษร (≥4.5:1)       accent-soft  พื้นอ่อนของสีเน้น (ทึบ)
-//   on-accent    ตัวอักษรบนพื้นสีเน้น              em · underline  สีตัวเอียง/ขีดเส้นใต้ของธีม ปรับให้อ่านได้ (≥4.5:1)
+//   on-accent    ตัวอักษรบนพื้นสีเน้น (ขาว ≥4.5:1 หรือเข้ม ≥7:1 — accent ถูกเลื่อนให้ได้ตามนี้)              em · underline  สีตัวเอียง/ขีดเส้นใต้ของธีม ปรับให้อ่านได้ (≥4.5:1)
 //   ok · warn · danger   สีสถานะ                   c1 … c6    สีกลุ่มสำหรับกราฟ/แท็ก
 //
 // กติกา: แผงที่แสดงข้อมูลใช้ surface (ทึบ) · ปุ่ม/ไอคอนลอยโปร่งได้ตามดีไซน์ ไม่ต้องใช้ตัวแปรนี้
@@ -42,7 +42,7 @@
 //   palette.setAccent('em');                                          // เปลี่ยนช่องสีเน้น
 //   ใน CSS:  --pw-accent: var(--pw-p-accent, var(--SmartThemeQuoteColor));   (ค่าเดิมเป็นสำรอง)
 
-export const PALETTE_VERSION = 3;
+export const PALETTE_VERSION = 4;
 
 export const ACCENT_SOURCES = Object.freeze({
     quote: '--SmartThemeQuoteColor',
@@ -92,6 +92,26 @@ export function ensureContrast(rgb, bg, min) {
     }
     return goDark ? [20, 20, 24] : [240, 240, 236];
 }
+const WHITE = [255, 255, 255];
+const INK = [20, 20, 24];
+/**
+ * พื้นสีที่มีตัวอักษรวางทับ (ปุ่มหลัก ป้ายตัวเลข แท็บที่เลือก): คงโทนสี เลื่อนแค่ความสว่าง จน
+ * ตัวอักษรขาวได้ ≥ 4.5:1 หรือตัวอักษรเข้มได้ ≥ 7:1 และพื้นยังตัดกับ bg ≥ minBg
+ * ทำไมเข้มต้อง 7: ตัวอักษรดำบนสีกลาง ๆ (ชมพู ม่วง ฟ้า) อ่านยากกว่าที่ค่า contrast บอกมาก
+ * เช่น ดำบนชมพูอมม่วงได้ 4.9:1 แต่ผู้ใช้อ่านไม่ออกบนมือถือ — สีกลางจึงถูกทำให้เข้มลงแล้วใช้ตัวขาว
+ * @returns {{ fill: number[], on: number[] }}
+ */
+export function fillFor(rgb, bg, minBg = 3) {
+    if (contrast(WHITE, rgb) >= 4.5) return { fill: rgb, on: WHITE };
+    if (contrast(INK, rgb) >= 7) return { fill: rgb, on: INK };
+    const L = luminance(rgb);
+    const options = [
+        { fill: ensureContrast(rgb, WHITE, 4.5), on: WHITE },
+        { fill: ensureContrast(rgb, INK, 7), on: INK },
+    ].filter(o => !bg || contrast(o.fill, bg) >= minBg)
+        .sort((a, b) => Math.abs(luminance(a.fill) - L) - Math.abs(luminance(b.fill) - L));
+    return options[0] ?? { fill: rgb, on: contrast(WHITE, rgb) >= contrast(INK, rgb) ? WHITE : INK };
+}
 const flatten = (c, bg) => (c[3] === undefined || c[3] >= 1 ? c.slice(0, 3) : c.slice(0, 3).map((v, i) => v * c[3] + bg[i] * (1 - c[3])));
 const mix = (a, b, t) => a.map((v, i) => v * (1 - t) + b[i] * t);
 const css = c => `rgb(${c.map(v => Math.round(Math.max(0, Math.min(255, v)))).join(', ')})`;
@@ -110,10 +130,10 @@ export function computePalette(theme, accentName = 'quote', surfaces = {}, color
     const raw = theme[src] ? flatten(theme[src], bg) : fg;
     let [ah, as] = rgbToHsl(raw);
     if (as < 0.12) as = 0;
-    const accent = ensureContrast(raw, bg, 3);
+    // accent ใช้เป็นทั้งเส้นขอบ (≥3:1 กับพื้น) และพื้นปุ่ม/ป้ายที่มีตัวอักษร on-accent ทับ
+    const { fill: accent, on: onAccent } = fillFor(ensureContrast(raw, bg, 3), bg, 3);
     const accentText = ensureContrast(raw, bg, 4.5);
     const textOf = v => css(ensureContrast(theme[v] ? flatten(theme[v], bg) : fg, bg, 4.5));
-    const onAccent = contrast([255, 255, 255], accent) >= contrast([20, 20, 24], accent) ? [255, 255, 255] : [20, 20, 24];
     const sat = as ? Math.min(0.75, Math.max(0.42, as)) : 0.45;
     const hue = (dh, sMul = 1) => ensureContrast(hslToRgb([ah + dh, sat * sMul, light ? 0.42 : 0.66]), bg, 2.6);
     const status = (h, s) => ensureContrast(hslToRgb([h, s, light ? 0.4 : 0.62]), bg, 3);
