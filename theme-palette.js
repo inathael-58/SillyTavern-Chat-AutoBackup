@@ -125,7 +125,9 @@ export function computePalette(theme, accentName = 'quote', surfaces = {}, color
     const bg = pick.slice(0, 3);
     const light = luminance(bg) > 0.18;
     const body = theme['--SmartThemeBodyColor'];
-    const fg = ensureContrast(body ? flatten(body, bg) : (light ? [30, 30, 34] : [230, 230, 222]), bg, 4.5);
+    // text must read on the panel AND on inputs/cards (surface2, a step toward fg)
+    const fg0 = ensureContrast(body ? flatten(body, bg) : (light ? [30, 30, 34] : [230, 230, 222]), bg, 4.5);
+    const fg = ensureContrast(fg0, mix(bg, fg0, 0.06), 4.5);
     const src = ACCENT_SOURCES[accentName] ?? ACCENT_SOURCES.quote;
     const raw = theme[src] ? flatten(theme[src], bg) : fg;
     let [ah, as] = rgbToHsl(raw);
@@ -142,7 +144,7 @@ export function computePalette(theme, accentName = 'quote', surfaces = {}, color
         surface: `rgba(${bg.map(v => Math.round(v)).join(', ')}, 0.97)`,
         surface2: css(surface2),
         fg: css(fg),
-        muted: css(ensureContrast(mix(bg, fg, 0.65), bg, 3)),
+        muted: css(ensureContrast(ensureContrast(mix(bg, fg, 0.65), bg, 3), surface2, 3)),
         line: css(mix(bg, fg, 0.22)),
         accent: css(accent),
         'accent-text': css(accentText),
