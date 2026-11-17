@@ -1,7 +1,7 @@
 // float-colors.js — สีปุ่มลอยแบบ "ปรับตามธีม" (adaptive) สำหรับ extension ของ SillyTavern
 // ใช้ร่วมกันใน Chat Auto Backup · Lore Lens · Chat Browser · As you command · Quick Dock
 // คัดลอกไฟล์นี้ทั้งไฟล์ อย่าแก้แยกที่ใดที่หนึ่ง (ต้องมี theme-palette.js อยู่ข้าง ๆ)
-// FLOAT_COLORS_VERSION 1
+// FLOAT_COLORS_VERSION 2 (ต้องใช้ theme-palette.js PALETTE_VERSION 4 ขึ้นไป)
 //
 // ปุ่มลอยมีสีได้สองแบบต่อช่อง:
 //   ปรับตามธีม  ดึงสีจากแม่แบบสี (theme-palette.js) แล้วปรับความสว่างให้ตัดกับพื้นปุ่มเสมอ
@@ -19,9 +19,9 @@
 //   if (c) el.style.setProperty('--xx-fg', c.fg);
 //   palette.onChange(() => applyLook());   // คำนวณใหม่เมื่อเปลี่ยนธีม
 
-import { parseColor, contrast, ensureContrast, luminance } from './theme-palette.js';
+import { parseColor, contrast, ensureContrast, luminance, fillFor } from './theme-palette.js';
 
-export const FLOAT_COLORS_VERSION = 1;
+export const FLOAT_COLORS_VERSION = 2;
 
 /** ชื่อโหมดสีสำหรับเมนูในหน้าตั้งค่า */
 export const COLOR_MODE_LABELS = Object.freeze({
@@ -50,7 +50,8 @@ const css = c => `rgb(${c.map(v => Math.round(Math.max(0, Math.min(255, v)))).jo
 const mix = (a, b, t) => a.map((v, i) => v * (1 - t) + b[i] * t);
 const WHITE = [255, 255, 255];
 const INK = [20, 20, 24];
-const bestOn = c => (contrast(WHITE, c) >= contrast(INK, c) ? WHITE : INK);
+// สีที่ผู้ใช้เลือกเองเปลี่ยนไม่ได้: ขาวถ้าได้ 4.5 · เข้มถ้าได้ 7 · ไม่งั้นอันที่ตัดกว่า
+const bestOn = c => (contrast(WHITE, c) >= 4.5 ? WHITE : contrast(INK, c) >= 7 ? INK : contrast(WHITE, c) >= contrast(INK, c) ? WHITE : INK);
 
 /**
  * สีของปุ่มลอย
@@ -64,7 +65,7 @@ const bestOn = c => (contrast(WHITE, c) >= contrast(INK, c) ? WHITE : INK);
  *   border      เส้นขอบ
  *   accent      สีเน้น/วงแหวน/ป้ายตัวเลข ≥ 3:1 กับพื้นปุ่ม (คงโทนสีเน้นของธีม)
  *   accentText  สีเน้นที่ใช้เป็นตัวอักษร ≥ 4.5:1
- *   onAccent    ตัวอักษรบนพื้นสีเน้น (ขาวหรือเข้ม แล้วแต่อันไหนตัดกว่า)
+ *   onAccent    ตัวอักษรบนพื้นสีเน้น: ขาว ≥4.5:1 หรือเข้ม ≥7:1 (สีเน้นที่ปรับตามธีมถูกเลื่อนให้ได้ตามนี้)
  *   danger      สีเตือน ≥ 4.5:1
  *   ring        วงรอบป้ายตัวเลข (= พื้นปุ่ม)
  */
@@ -75,7 +76,8 @@ export function floatColors(p, pick = {}) {
     const themeAccent = (p && resolveRgb(p.accent)) ?? resolveRgb('var(--SmartThemeQuoteColor)') ?? themeFg;
     const fg = resolveRgb(pick.fg) ?? ensureContrast(themeFg, bg, 4.5);
     const accentPicked = resolveRgb(pick.accent);
-    const accent = accentPicked ?? ensureContrast(themeAccent, bg, 3);
+    const auto = accentPicked ? null : fillFor(ensureContrast(themeAccent, bg, 3), bg, 3);
+    const accent = accentPicked ?? auto.fill;
     return {
         bg: css(bg),
         fg: css(fg),
@@ -83,7 +85,7 @@ export function floatColors(p, pick = {}) {
         border: css(resolveRgb(pick.border) ?? mix(bg, fg, 0.3)),
         accent: css(accent),
         accentText: css(accentPicked ?? ensureContrast(themeAccent, bg, 4.5)),
-        onAccent: css(bestOn(accent)),
+        onAccent: css(auto ? auto.on : bestOn(accent)),
         danger: css(ensureContrast([229, 72, 77], bg, 4.5)),
         ring: css(bg),
         light: luminance(bg) > 0.18,
