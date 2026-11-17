@@ -19,7 +19,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.11.0'; // keep in sync with manifest.json
+const VERSION = '2.12.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -563,7 +563,8 @@ function captureNow() {
     }
     const jsonl = lines.join('\n');
     const sigs = { head, msgs };
-    const syncState = keys && { keys, sig: hash(keys.join('\n')), meta: metaSig(JSON.parse(h)), count: keys.length };
+    const parsedHead = keys && JSON.parse(h);
+    const syncState = keys && { keys, sig: hash(keys.join('\n')), meta: metaSig(parsedHead), mk: metaKeySigs(parsedHead), count: keys.length };
 
     return {
         info,
@@ -2382,7 +2383,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                         const rText = await dbxDownloadText(`rev:${remote.rev}`);
                         const r = chatState(parseJsonl(rText));
                         if (r.sig === mine.sig && metaEq(r.meta, mine.meta)) {
-                            setSyncBase(m.key, { rev: remote.rev, sig: mine.sig, meta: mine.meta ?? r.meta });
+                            setSyncBase(m.key, { rev: remote.rev, sig: mine.sig, meta: mine.meta ?? r.meta, mk: mine.mk ?? r.mk });
                             await markSent();
                             continue;
                         }
@@ -2434,7 +2435,7 @@ async function cloudTick({ ignoreGap = false, force = false, forceKeys = null, f
                 hold('Dropbox มีฉบับที่แก้จากเครื่องอื่น — ต้องซิงค์ก่อน', 'diverged');
                 continue;
             }
-            setSyncBase(m.key, { rev: up.rev, sig: mine.sig, meta: mine.meta });
+            setSyncBase(m.key, { rev: up.rev, sig: mine.sig, meta: mine.meta, mk: mine.mk });
             m.cloud = Date.now();
             await dbMarkCloud(m.id, m.cloud);
             cloud.unsent.delete(m.key);
@@ -2798,7 +2799,7 @@ function chatState(arr) {
     const head = list.length && !('mes' in list[0]) ? list[0] : null;
     const msgs = head ? list.slice(1) : list;
     const keys = msgs.map(syncMsgKey);
-    return { head, msgs, keys, sig: hash(keys.join('\n')), meta: metaSig(head), count: msgs.length };
+    return { head, msgs, keys, sig: hash(keys.join('\n')), meta: metaSig(head), mk: metaKeySigs(head), count: msgs.length };
 }
 
 // Chat metadata keys that differ per server or per load and say nothing about the chat.
@@ -2819,6 +2820,41 @@ function metaSig(head) {
 }
 
 const metaEq = (a, b) => a == null || b == null || a === b;
+
+/** Signature of each chat metadata key (volatile ones left out); null when the file has no header. */
+function metaKeySigs(head) {
+    if (!head) return null;
+    const out = {};
+    for (const [k, v] of Object.entries(head.chat_metadata ?? {})) {
+        if (!META_VOLATILE.includes(k)) out[k] = hash(stableJson(v));
+    }
+    return out;
+}
+
+/**
+ * Chat metadata when both sides changed it since the last match. With the last match's key
+ * signatures (`baseKeys`) it is a per-key three-way merge: a key changed or REMOVED on one side
+ * only keeps that side's change, so a key removed here (e.g. a Chat Lore link) doesn't come back
+ * from Dropbox. A key both sides changed goes to Dropbox. Without them: this side's keys that
+ * Dropbox lacks are kept, Dropbox wins on keys both have.
+ */
+function mergeChatMeta(localMeta, remoteMeta, baseKeys) {
+    const local = localMeta ?? {}, remote = remoteMeta ?? {};
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    if (!baseKeys || typeof baseKeys !== 'object') return { ...local, ...remote };
+    const out = {};
+    const sig = (o, k) => (has(o, k) ? hash(stableJson(o[k])) : undefined);
+    for (const k of new Set([...Object.keys(local), ...Object.keys(remote)])) {
+        let side;
+        if (META_VOLATILE.includes(k)) side = has(remote, k) ? remote : local;
+        else {
+            const l = sig(local, k), r = sig(remote, k), b = baseKeys[k];
+            side = l === r || r === b ? local : remote;
+        }
+        if (has(side, k)) out[k] = side[k];
+    }
+    return out;
+}
 
 /** True when b is a continued from a: same messages, then more (b may also have more swipes on a's last). */
 function isAncestor(a, b) {
@@ -2944,6 +2980,7 @@ async function settleOpenChat(t) {
  * Compare one Dropbox file with the server. Returns null when nothing needs doing,
  * otherwise an item whose `kind` is one of
  *   forward · changed · create   — safe to write here
+ *   push                         — only this side changed the header: send it to Dropbox
  *   conflict · shorter · gone · new — the user decides
  */
 async function syncClassify(f, t) {
@@ -2957,7 +2994,7 @@ async function syncClassify(f, t) {
     // Same messages as when we last matched; only the header changed (e.g. the other side
     // re-saved it after a sync). Anything new here is for the upload to send.
     if (base && !base.skipped && base.sig === remote.sig && base.meta !== undefined && metaEq(base.meta, remote.meta)) {
-        setSyncBase(t.key, { rev: f.rev, sig: remote.sig, meta: base.meta });
+        setSyncBase(t.key, { rev: f.rev, sig: remote.sig, meta: base.meta, mk: base.mk });
         return null;
     }
     const local = chatState(await serverChat(t));
@@ -2966,7 +3003,7 @@ async function syncClassify(f, t) {
         remote: { count: remote.count, sig: remote.sig, keys: remote.keys, meta: remote.meta },
         local: { count: local.count, sig: local.sig, keys: local.keys, meta: local.meta },
     };
-    const agree = () => { setSyncBase(t.key, { rev: f.rev, sig: remote.sig, meta: remote.meta ?? local.meta }); return null; };
+    const agree = () => { setSyncBase(t.key, { rev: f.rev, sig: remote.sig, meta: remote.meta ?? local.meta, mk: remote.mk ?? local.mk }); return null; };
 
     if (!local.count) {
         if (base && !base.skipped) return { ...item, kind: 'gone' };
@@ -2976,7 +3013,9 @@ async function syncClassify(f, t) {
     if (local.sig === remote.sig) {
         if (metaEq(local.meta, remote.meta)) return agree();
         // Same messages, different chat metadata (memory, variables… kept by extensions).
-        if (base && !base.skipped && base.meta === remote.meta) return agree(); // only this side changed it: the upload sends it
+        // Only this side changed it (a Chat Lore link removed, an extension's data…). Nothing
+        // else uploads a header-only change of a chat that isn't open, so send it now.
+        if (base && !base.skipped && base.meta === remote.meta) return { ...item, kind: 'push' };
         return { ...item, kind: 'meta' };
     }
     // Unchanged here since we last matched: whatever Dropbox has now is the other side's
@@ -3026,13 +3065,15 @@ async function syncUseRemote(item, { asNewChat = false } = {}) {
     const localArr = asNewChat ? [] : await serverChat(t);
     const local = chatState(localArr);
     // Chat metadata: Dropbox's, unless this side changed it too since the last match — then
-    // keep this side's keys that Dropbox lacks (Dropbox wins on keys both have).
+    // merge per key (see mergeChatMeta).
     const base = asNewChat ? null : syncBase(t.key);
     const remoteMeta = remote.head?.chat_metadata, localMeta = local.head?.chat_metadata;
     const localMetaKept = base && !base.skipped && base.meta === local.meta;
+    const remoteMetaKept = base && !base.skipped && local.count && base.meta != null && base.meta === remote.meta;
     const chatMeta = !remoteMeta ? (localMeta ?? {})
         : (!local.count || localMetaKept || metaEq(local.meta, remote.meta)) ? remoteMeta
-        : { ...(localMeta ?? {}), ...remoteMeta };
+        : remoteMetaKept ? (localMeta ?? {}) // only this side changed it: removed keys stay removed
+        : mergeChatMeta(localMeta, remoteMeta, base && !base.skipped ? base.mk : null);
     const now = Date.now();
     const nothingToWrite = local.count && local.sig === remote.sig && metaSig({ chat_metadata: chatMeta }) === local.meta;
     if (!nothingToWrite) {
@@ -3043,7 +3084,7 @@ async function syncUseRemote(item, { asNewChat = false } = {}) {
         if (remote.count < local.count) await ackShrink(t.key); // fewer messages on purpose, not a broken load
         await addSnapshotText(t, remoteText, { source: 'dropbox', cloud: now, ts: now });
         // Base = what Dropbox holds; if merged metadata differs from it, the upload sends ours.
-        setSyncBase(t.key, { rev: item.rev, sig: remote.sig, meta: remote.meta ?? local.meta });
+        setSyncBase(t.key, { rev: item.rev, sig: remote.sig, meta: remote.meta ?? local.meta, mk: remote.mk ?? local.mk });
         setCloudRecord(t.key, { ts: now, count: remote.count });
         cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
     }
@@ -3068,7 +3109,7 @@ async function syncUseLocal(item) {
     }
     const now = Date.now();
     await addSnapshotText(t, text, { source: 'before-sync', cloud: now, ts: now });
-    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta, mk: st.mk });
     setCloudRecord(t.key, { ts: now, count: st.count });
     cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
 }
@@ -3138,7 +3179,7 @@ async function syncKeepDeleted(item) {
         throw e;
     }
     try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(t) }); } catch { /* already gone */ }
-    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta, mk: st.mk });
     await markKeySent(t.key);
     cloud.withheld = cloud.withheld.filter(w => w.key !== t.key);
 }
@@ -3221,7 +3262,7 @@ async function renameInDropbox(oldT, newT) {
         const now = Date.now();
         const up = await dbxUpload(dbxPathOf(newT), new Blob([toJsonl(arr)], { type: 'application/octet-stream' }), now, 'overwrite');
         try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(newT) }); } catch { /* no marker */ }
-        setSyncBase(newT.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+        setSyncBase(newT.key, { rev: up.rev, sig: st.sig, meta: st.meta, mk: st.mk });
         setCloudRecord(newT.key, { ts: now, count: st.count });
         await markKeySent(newT.key);
     }
@@ -3432,7 +3473,7 @@ async function uploadServerChat(t) {
     }
     try { await dbxRpc('files/delete_v2', { path: dbxTombPathOf(t) }); } catch { /* no marker */ }
     const now = Date.now();
-    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta });
+    setSyncBase(t.key, { rev: up.rev, sig: st.sig, meta: st.meta, mk: st.mk });
     setCloudRecord(t.key, { ts: now, count: st.count });
     await markKeySent(t.key);
     return true;
@@ -3584,6 +3625,7 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
                 try {
                     const item = tomb ? await syncClassifyDeleted(files[i], t) : await syncClassify(files[i], t);
                     if (!item) continue;
+                    if (item.kind === 'push') { await syncUseLocal(item); continue; }
                     if (AUTO_KINDS.includes(item.kind)) {
                         badgeApply(t.label);
                         await (item.kind === 'remove' ? syncDeleteLocal(item) : syncUseRemote(item));
