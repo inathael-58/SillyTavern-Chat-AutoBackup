@@ -19,7 +19,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.12.1'; // keep in sync with manifest.json
+const VERSION = '2.12.2'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -4818,12 +4818,12 @@ async function stSecrets() {
 }
 
 /** Bind an API key to a synced profile: a new key typed here, or one this server already has. */
-async function bindCpKey(id, rec, { value = '', existing = '' } = {}) {
+async function bindCpKey(id, rec, { value = '', existing = '', label = '' } = {}) {
     let secretId = existing;
     if (!secretId) {
         const res = await fetch('/api/secrets/write', {
             method: 'POST', headers: ctx().getRequestHeaders(),
-            body: JSON.stringify({ key: rec.key, value, label: rec.label || rec.name }),
+            body: JSON.stringify({ key: rec.key, value, label: label || rec.label || rec.name }),
         });
         if (!res.ok) throw new Error(`บันทึก API key ไม่สำเร็จ (${res.status})`);
         secretId = (await res.json().catch(() => null))?.id;
@@ -4849,7 +4849,7 @@ async function showCpKeyDialog() {
                 <div class="cab_close menu_button fa-solid fa-xmark" title="ปิด"></div>
             </div>
             <div class="cab_list">
-                <p class="cab_note">profile เหล่านี้มาจากอีกเครื่อง ซึ่งใช้ API key ไว้ด้วย API key ไม่ถูกส่งข้ามเครื่อง ใส่ key สำหรับเครื่องนี้ หรือเลือก key ที่มีในเครื่องนี้อยู่แล้ว</p>
+                <p class="cab_note">profile เหล่านี้มาจากอีกเครื่อง ซึ่งใช้ API key ไว้ด้วย API key ไม่ถูกส่งข้ามเครื่อง ใส่ key สำหรับเครื่องนี้ (ตั้งชื่อ key ได้ จะขึ้นในหน้าจัดการ API key ของ ST) หรือเลือก key ที่มีในเครื่องนี้อยู่แล้ว</p>
                 ${need.map(([id, r], i) => {
                     const mine = Array.isArray(state?.[r.key]) ? state[r.key] : [];
                     return `
@@ -4857,6 +4857,7 @@ async function showCpKeyDialog() {
                     <h4>${escapeHtml(r.name)}</h4>
                     <p>ชนิด key: <code>${escapeHtml(r.key)}</code>${r.label ? ` · ชื่อ key ที่อีกเครื่อง: ${escapeHtml(r.label)}` : ''}</p>
                     <input type="password" class="text_pole cab_cpkey_value" autocomplete="off" placeholder="วาง API key ที่นี่">
+                    <input type="text" class="text_pole cab_cpkey_label" autocomplete="off" maxlength="200" value="${escapeHtml(r.label || r.name)}" placeholder="ชื่อ key (ขึ้นในหน้าจัดการ API key ของ ST)" title="ชื่อ key ที่ใช้ในหน้าจัดการ API key ของ ST ใช้เฉพาะตอนใส่ key ใหม่">
                     ${mine.length ? `<select class="text_pole cab_cpkey_pick"><option value="">หรือใช้ key ที่มีในเครื่องนี้…</option>${mine.map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(`${x.label ?? ''} (${x.value ?? ''})`)}</option>`).join('')}</select>` : ''}
                     <div class="cab_buttons">
                         <div class="menu_button cab_primary" data-a="save">บันทึก</div>
@@ -4868,6 +4869,13 @@ async function showCpKeyDialog() {
         </div>`);
     for (const sec of wrap.querySelectorAll('section[data-i]')) {
         const [id, rec] = need[Number(sec.dataset.i)];
+        // The name only applies to a key typed here; picking an existing key keeps that key's name.
+        const valueIn = sec.querySelector('.cab_cpkey_value');
+        const labelIn = sec.querySelector('.cab_cpkey_label');
+        const pickIn = sec.querySelector('.cab_cpkey_pick');
+        const syncLabel = () => { labelIn.disabled = !valueIn.value.trim() && !!pickIn?.value; };
+        valueIn.addEventListener('input', syncLabel);
+        pickIn?.addEventListener('change', syncLabel);
         const done = () => { sec.remove(); if (!wrap.querySelector('section[data-i]')) close(); };
         sec.addEventListener('click', async e => {
             const a = e.target?.dataset?.a;
@@ -4878,7 +4886,8 @@ async function showCpKeyDialog() {
             if (!value && !existing) { toast.warn('วาง API key หรือเลือก key ที่มีอยู่ก่อน', 'Connection profile'); return; }
             e.target.classList.add('disabled');
             try {
-                await bindCpKey(id, rec, { value, existing: value ? '' : existing });
+                const label = sec.querySelector('.cab_cpkey_label')?.value.trim() ?? '';
+                await bindCpKey(id, rec, { value, existing: value ? '' : existing, label });
                 toast.ok(`ตั้ง API key ให้ "${rec.name}" แล้ว`, 'Connection profile');
                 done();
             } catch (err) {
