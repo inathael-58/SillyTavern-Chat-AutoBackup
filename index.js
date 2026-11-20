@@ -4959,11 +4959,19 @@ function forgetDeletedHere(key) {
 
 // Markers written by 2.7.0 came from guessing ("missing here") and deleted renamed cards on the
 // other devices. Only markers that say `explicit` may delete a card or persona.
+// An explicit marker is always this many bytes (the date is fixed-length), so the listing alone says so:
+// deleting many cards at once must not cost the other devices one download per card.
+const EXPLICIT_TOMB_SIZE = JSON.stringify({ deleted: new Date(0).toISOString(), explicit: true }).length;
 const tombNotes = new Map(); // marker rev -> parsed marker
 async function tombIsExplicit(T) {
+    if (Number(T.size) === EXPLICIT_TOMB_SIZE) return true;
     if (!tombNotes.has(T.rev)) {
+        // A marker that can't be fetched right now (Dropbox asking to wait, no connection) throws, so the
+        // item is looked at again next sync. Taking it for a 2.7.0 guess would send the card back up and
+        // drop the marker: the deletion would be undone on every device.
+        const text = await dbxDownloadText(`rev:${T.rev}`);
         let note = null;
-        try { note = JSON.parse(await dbxDownloadText(`rev:${T.rev}`)); } catch { /* unreadable: treat as a guess */ }
+        try { note = JSON.parse(text); } catch { /* not a marker this version wrote: a guess */ }
         tombNotes.set(T.rev, note);
     }
     return !!tombNotes.get(T.rev)?.explicit;
@@ -5669,9 +5677,10 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 // Matched once, now missing here, yet nobody deleted or renamed it here and its chats
                 // wait in Dropbox (e.g. an import that didn't stick): bring it in again.
                 const comeBack = !L && want.has(key) && B && !B.deleted && !B.renamed && !deleted.has(key);
-                // A lorebook or preset the user deleted here goes, even if Dropbox got a newer copy from a device
-                // that hadn't heard of the deletion yet (that copy stays restorable in Dropbox for ~30 days).
-                if (!L && (R.type === 'wi' || R.type === 'preset') && deleted.has(key)) {
+                // A card, persona, lorebook or preset the user deleted here goes, even if Dropbox got a newer copy
+                // from a device that hadn't heard of the deletion yet, or this device never matched it (that copy
+                // stays restorable in Dropbox for ~30 days). Otherwise it would be imported straight back here.
+                if (!L && ['wi', 'preset', 'card', 'persona'].includes(R.type) && deleted.has(key) && listedHere(R.type)) {
                     if (deletesOn) {
                         await deleteItemEverywhere({ ...R, key });
                         out.itemsSent++;
