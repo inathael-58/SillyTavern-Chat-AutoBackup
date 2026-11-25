@@ -19,7 +19,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.12.5'; // keep in sync with manifest.json
+const VERSION = '2.13.0'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -3549,6 +3549,23 @@ async function listChatFiles(only) {
     return files;
 }
 
+/** State for one round of removing old deletion markers, or null when it isn't due. */
+function markerPrune(d) {
+    if (Date.now() - (Number(d.markersPrunedAt) || 0) < MARKER_PRUNE_EVERY_MS) return null;
+    return { cutoff: Date.now() - MARKER_KEEP_DAYS * 24 * 3600_000, left: MARKER_PRUNE_MAX, chats: 0, items: 0, done: true };
+}
+const markerIsOld = (f, prune) => (Date.parse(f.server_modified) || Infinity) < prune.cutoff;
+
+/** Remove one deletion marker from Dropbox; false (and the round isn't done) when it couldn't. */
+async function pruneMarker(f, prune) {
+    if (prune.left <= 0) { prune.done = false; return false; }
+    prune.left--;
+    try { await dbxRpc('files/delete_v2', { path: f.path_lower || f.path_display }); } catch (e) {
+        if (!/not_found/.test(String(e?.message))) { console.warn(LOG, 'marker', f.path_display, e); prune.done = false; return false; }
+    }
+    return true;
+}
+
 /**
  * What the Dropbox folder holds, by kind, so the panel can say what a sync goes through:
  * chats pile up (every new chat, branch and checkpoint is a file) and a deleted chat, card or
@@ -3618,7 +3635,8 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
         setBadge('check', '', { quiet });
         try {
             const files = await listChatFiles(only);
-            if (!only) await syncItems(files, out, { auto, want: cardsWanted(files) });
+            const prune = only ? null : markerPrune(d);
+            if (!only) await syncItems(files, out, { auto, want: cardsWanted(files), prune });
             // /character|group/<entity>/<chat>.jsonl, or a deletion marker /deleted/…/<chat>.json
             const parse = f => {
                 const parts = String(f.path_display || '').split('/').filter(Boolean);
@@ -3676,6 +3694,22 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
                     out.errors.push(`${t.label}: ${e?.message ?? e}`);
                     if (/Dropbox (ขอให้รอ|ยกเลิกสิทธิ์)/.test(String(e?.message))) break;
                 }
+            }
+            // Chat deletion markers older than MARKER_KEEP_DAYS: once this device followed them
+            // (or the chat came back, which wins anyway) they only make every sync longer.
+            if (prune && !out.errors.length) {
+                for (let i = 0; i < files.length; i++) {
+                    const p = parsed[i];
+                    if (!p?.tomb || !markerIsOld(files[i], prune)) continue;
+                    const B = syncBase(p.t.key);
+                    if (!inDropbox.has(p.t.key) && !(B?.deleted && B.rev === files[i].rev)) continue; // still waiting here
+                    syncProgress(`ล้างป้ายลบที่เก่ากว่า ${MARKER_KEEP_DAYS} วัน…`, 'ล้างป้ายลบเก่า');
+                    if (await pruneMarker(files[i], prune)) prune.chats++;
+                    else if (prune.left <= 0) break;
+                }
+                if (sync.dbxCounts) { sync.dbxCounts.chatTombs -= prune.chats; sync.dbxCounts.itemTombs -= prune.items; sync.dbxCounts.total -= prune.chats + prune.items; }
+                if (prune.chats + prune.items) sync.pruned = { n: (sync.pruned?.n || 0) + prune.chats + prune.items, at: Date.now() };
+                if (prune.done) { d.markersPrunedAt = Date.now(); saveSettings(); }
             }
         } catch (e) {
             out.errors.push(String(e?.message ?? e));
@@ -3843,6 +3877,11 @@ const itemsDirty = new Set(ITEM_KINDS);
 const kindOfKey = key => (key.startsWith('p:') ? 'preset' : key.slice(0, key.indexOf(':')));
 let itemsFullAt = 0;                          // last sync that compared every kind
 const ITEMS_FULL_EVERY_MS = 30 * 60_000;      // safety net for a change no save request showed
+// Deletion markers (/deleted/…) older than this are removed from Dropbox, once this device has
+// followed them: a device that stays away longer may send a deleted chat or card back up.
+const MARKER_KEEP_DAYS = 60;
+const MARKER_PRUNE_EVERY_MS = 24 * 3600_000;
+const MARKER_PRUNE_MAX = 300;                   // per run, so one sync never spends minutes on it
 
 /**
  * Something of these kinds was saved here. A chat upload holding Dropbox doesn't hide it (only
@@ -4078,6 +4117,7 @@ function renderSyncStatus() {
         ].filter(Boolean);
         parts.push(`ใน Dropbox ${dc.total} ไฟล์: ${kinds.join(' · ')}`);
     }
+    if (sync.pruned?.n) parts.push(`ล้างป้ายลบที่เก่ากว่า ${MARKER_KEEP_DAYS} วันออกจาก Dropbox แล้ว ${sync.pruned.n} ไฟล์`);
     if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
     if (sync.items) parts.push(`preset/การ์ด/lorebook/persona/QR/regex/profile: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
     if (sync.invalid?.length) parts.push(`ข้ามไฟล์ใน Dropbox ที่ไม่ใช่ข้อมูลที่ใช้ได้: ${sync.invalid.slice(0, 3).join(', ')}${sync.invalid.length > 3 ? ' …' : ''}`);
@@ -5579,13 +5619,13 @@ async function refreshCardsAfter(applied) {
  * Sync presets and cards with Dropbox (run inside the Dropbox lock, before chats so that
  * new characters exist when their chats arrive). auto: stop after ~15 s, continue next round.
  */
-async function syncItems(entries, out, { auto = false, want = new Set() } = {}) {
+async function syncItems(entries, out, { auto = false, want = new Set(), prune = null } = {}) {
     const d = dbxSettings();
     const doPresets = d.syncPresets !== false, doCards = d.syncCards !== false;
     const doWorlds = d.syncLorebooks !== false, doPersonas = d.syncPersonas !== false;
     const doQr = d.syncQuickReplies !== false && !qrReloadNeeded, doRegex = d.syncRegex !== false;
     const doCp = d.syncConnProfiles !== false;
-    if (!doPresets && !doCards && !doWorlds && !doPersonas && !doQr && !doRegex && !doCp) return;
+    if (!doPresets && !doCards && !doWorlds && !doPersonas && !doQr && !doRegex && !doCp) { if (prune) prune.done = false; return; }
     const remote = new Map();
     const tombs = new Map(); // deletion markers (Quick Reply, regex, lorebook, preset, card, persona, profile)
     let regexOrder = null;
@@ -5809,6 +5849,22 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
                 if (key.includes(':') && need.has(kindOfKey(key)) && !B?.deleted && !remote.has(key) && !tombs.has(key) && !local.has(key)) setItemBase(key, null);
             }
             if (ITEM_KINDS.every(k => !enabled[k] || need.has(k))) itemsFullAt = Date.now();
+            // Item deletion markers older than MARKER_KEEP_DAYS this device has followed (nothing
+            // here, base deleted at that marker), or whose item is back in Dropbox.
+            // Only kinds compared this run have their local list read; the rest wait for a full run.
+            if (prune && !ITEM_KINDS.every(k => !enabled[k] || need.has(k))) prune.done = false;
+            if (prune) {
+                for (const [key, T] of tombs) {
+                    if (!need.has(kindOfKey(key)) || !markerIsOld(T, prune)) continue;
+                    const B = itemBase(key);
+                    if (!remote.has(key) && !(B?.deleted && B.rev === T.rev && !local.has(key) && !deleted.has(key))) continue;
+                    syncProgress(`ล้างป้ายลบที่เก่ากว่า ${MARKER_KEEP_DAYS} วัน…`, 'ล้างป้ายลบเก่า');
+                    if (await pruneMarker(T, prune)) prune.items++;
+                    else if (prune.left <= 0) break;
+                }
+            }
+        } else if (prune) {
+            prune.done = false;
         }
     } finally {
         if (!finished) for (const k of dirty) itemsDirty.add(k); // cut short (time limit, error): look again next time
@@ -6078,7 +6134,7 @@ globalThis.ChatAutoBackup = {
     api: 2,
     dropboxConnected: () => dbxConnected(),
     syncInUse: () => dbxConnected() && !!dbxSettings().syncSince,
-    syncState: () => ({ itemScope: sync.itemScope ?? null, dropbox: sync.dbxCounts ?? null, running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
+    syncState: () => ({ itemScope: sync.itemScope ?? null, dropbox: sync.dbxCounts ?? null, markersPruned: sync.pruned ?? null, running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
     cloudInfo: key => (dbxConnected() ? { sent: cloudRecord(key), base: syncBase(key) } : null),
     cleanSyncPlan, cleanSyncApply, cleanLog, cleanRestore, onChatRenamed, noteServerChange,
 };
