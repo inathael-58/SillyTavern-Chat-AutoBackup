@@ -19,7 +19,7 @@ const SIGS = 'sigs';        // per-snapshot message signatures, used to describe
 const SNAP_VERSION = 2;     // meta.sv — snapshots below this get their preview/signatures rebuilt
 const PREVIEW_LEN = 200;
 const LOG = '[ChatAutoBackup]';
-const VERSION = '2.12.4'; // keep in sync with manifest.json
+const VERSION = '2.12.5'; // keep in sync with manifest.json
 const BASE_URL = new URL('.', import.meta.url);
 
 const DEFAULTS = Object.freeze({
@@ -3550,6 +3550,33 @@ async function listChatFiles(only) {
 }
 
 /**
+ * What the Dropbox folder holds, by kind, so the panel can say what a sync goes through:
+ * chats pile up (every new chat, branch and checkpoint is a file) and a deleted chat, card or
+ * lorebook leaves a deletion marker in /deleted/ so the other devices delete it too.
+ */
+function dropboxCounts(files, parsed) {
+    const c = { chats: 0, chatOwners: 0, chatTombs: 0, cards: 0, worlds: 0, presets: 0, personas: 0, other: 0, itemTombs: 0, total: files.length };
+    const owners = new Set();
+    for (let i = 0; i < files.length; i++) {
+        const p = parsed[i];
+        if (p) {
+            if (p.tomb) c.chatTombs++;
+            else { c.chats++; owners.add(`${p.t.type}:${p.t.type === 'group' ? p.t.groupId : p.t.avatar}`); }
+            continue;
+        }
+        const top = String(files[i].path_display || '').split('/').filter(Boolean)[0];
+        if (top === 'deleted') c.itemTombs++;
+        else if (top === 'cards') c.cards++;
+        else if (top === 'worlds') c.worlds++;
+        else if (top === 'presets') c.presets++;
+        else if (top === 'personas') c.personas++;
+        else c.other++;
+    }
+    c.chatOwners = owners.size;
+    return c;
+}
+
+/**
  * Cards in Dropbox whose chats are in Dropbox too but whose character isn't on this server:
  * the sync brings these first, so their chats can follow in the same run.
  */
@@ -3606,11 +3633,21 @@ async function syncPull({ auto = false, only = null, quiet = false } = {}) {
             // card to arrive, or for the other device to send the card at all.
             const cardsThere = new Set(files.map(f => String(f.path_lower || '')).filter(p => p.startsWith('/cards/')));
             const inDropbox = new Set(parsed.filter(p => p && !p.tomb).map(p => p.t.key));
+            if (!only) sync.dbxCounts = dropboxCounts(files, parsed);
+            // Only chat files and chat deletion markers this device hasn't followed yet: cards,
+            // lorebooks, presets… are checked above, and a marker already followed costs nothing.
+            const todo = [];
             for (let i = 0; i < files.length; i++) {
-                syncProgress(`กำลังตรวจ ${i + 1}/${files.length}…`, `แชท ${i + 1}/${files.length}`);
-                if (!parsed[i]) continue;
+                const p = parsed[i];
+                if (!p) continue;
+                if (p.tomb && inDropbox.has(p.t.key)) continue; // the chat came back since: it wins
+                if (p.tomb) { const B = syncBase(p.t.key); if (B?.deleted && B.rev === files[i].rev) continue; }
+                todo.push(i);
+            }
+            for (let n = 0; n < todo.length; n++) {
+                const i = todo[n];
+                syncProgress(`กำลังตรวจแชท ${n + 1}/${todo.length}…`, `แชท ${n + 1}/${todo.length}`);
                 const { tomb, t } = parsed[i];
-                if (tomb && inDropbox.has(t.key)) continue; // the chat came back since: it wins
                 if (!tomb && t.missing) {
                     out.missing.set(t.label, (out.missing.get(t.label) || 0) + 1);
                     if (t.type === 'character' && !cardsThere.has(cardPath(t.avatar).toLowerCase())) {
@@ -4031,6 +4068,16 @@ function renderSyncStatus() {
     if (sync.progress) parts.push(sync.progress);
     else if (sync.lastAt) parts.push(`ซิงค์ล่าสุด ${fmtTime(sync.lastAt).slice(11, 16)}`);
     else parts.push('ยังไม่ได้ซิงค์ในรอบนี้');
+    const dc = sync.dbxCounts;
+    if (dc && !sync.progress) {
+        const kinds = [
+            `แชท ${dc.chats} ไฟล์ (ของ ${dc.chatOwners} ตัวละคร/กลุ่ม)`,
+            dc.cards && `การ์ด ${dc.cards}`, dc.worlds && `lorebook ${dc.worlds}`, dc.presets && `preset ${dc.presets}`,
+            dc.personas && `persona ${dc.personas}`, dc.other && `อื่น ๆ ${dc.other}`,
+            (dc.chatTombs + dc.itemTombs) && `ป้ายลบ ${dc.chatTombs + dc.itemTombs}`,
+        ].filter(Boolean);
+        parts.push(`ใน Dropbox ${dc.total} ไฟล์: ${kinds.join(' · ')}`);
+    }
     if (sync.applied) parts.push(`อัปเดตจาก Dropbox แล้ว ${sync.applied} ครั้ง`);
     if (sync.items) parts.push(`preset/การ์ด/lorebook/persona/QR/regex/profile: รับ ${sync.items.got} ส่ง ${sync.items.sent}`);
     if (sync.invalid?.length) parts.push(`ข้ามไฟล์ใน Dropbox ที่ไม่ใช่ข้อมูลที่ใช้ได้: ${sync.invalid.slice(0, 3).join(', ')}${sync.invalid.length > 3 ? ' …' : ''}`);
@@ -5625,9 +5672,12 @@ async function syncItems(entries, out, { auto = false, want = new Set() } = {}) 
         // here means reading it (a request per card on a lazy-loading server), and a run with many
         // cards would spend its 15 s on those and never reach a card just added.
         const settled = k => { const B = bases[k]; return !!(B && !B.deleted && local.has(k) && remote.get(k)?.rev === B.rev); };
-        const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])].filter(k => need.has(kindOfKey(k)))
-            .sort((a, b) => (want.has(b) - want.has(a)) || (settled(a) - settled(b)));
         const deleted = deletedHere();
+        // A deletion marker this device already followed (nothing here, base says deleted at that
+        // marker) has nothing left to do: leave it out rather than count it as one more to check.
+        const followed = k => { const T = tombs.get(k), B = bases[k]; return !!(T && !remote.has(k) && !local.has(k) && !deleted.has(k) && B?.deleted && B.rev === T.rev); };
+        const keys = [...new Set([...remote.keys(), ...local.keys(), ...tombs.keys()])].filter(k => need.has(kindOfKey(k)) && !followed(k))
+            .sort((a, b) => (want.has(b) - want.has(a)) || (settled(a) - settled(b)));
         const deadline = auto ? Date.now() + 15_000 : Infinity;
         const cardsApplied = [];
         let personasApplied = 0;
@@ -6028,7 +6078,7 @@ globalThis.ChatAutoBackup = {
     api: 2,
     dropboxConnected: () => dbxConnected(),
     syncInUse: () => dbxConnected() && !!dbxSettings().syncSince,
-    syncState: () => ({ itemScope: sync.itemScope ?? null, running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
+    syncState: () => ({ itemScope: sync.itemScope ?? null, dropbox: sync.dbxCounts ?? null, running: cloud.running || badgeBusy(), lastAt: sync.lastAt, decisions: sync.decisions.length, error: sync.error || cloud.error, unsent: cloudUnsent() }),
     cloudInfo: key => (dbxConnected() ? { sent: cloudRecord(key), base: syncBase(key) } : null),
     cleanSyncPlan, cleanSyncApply, cleanLog, cleanRestore, onChatRenamed, noteServerChange,
 };
